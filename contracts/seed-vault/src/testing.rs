@@ -1292,3 +1292,125 @@ fn pending_yield_matches_the_claim_payout() {
     .unwrap();
     assert_eq!(total.amount, Uint128::new(200));
 }
+
+#[test]
+fn distribute_too_small_for_index_is_rejected() {
+    let mut deps = mock_dependencies();
+    let admin = addr20("admin");
+    let user = addr20("whale");
+
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        InstantiateMsg {
+            admin: admin.to_string(),
+            seed_denom: SEED.to_string(),
+            treasury_denom: USDT.to_string(),
+            keeper: None,
+            max_leverage: Decimal::from_ratio(3u128, 1u128),
+            max_position_size: Uint128::MAX,
+            max_total_margin_bps: 10_000,
+            allowed_markets: vec![MARKET_1.to_string()],
+        },
+    )
+    .unwrap();
+
+    // Deposit large treasury
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &coins(100_000_000_000_000, USDT)),
+        ExecuteMsg::DepositTreasury {},
+    )
+    .unwrap();
+
+    // Record PnL
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::RecordPnl {
+            delta: Int128::new(100_000_000_000_000),
+        },
+    )
+    .unwrap();
+
+    // Whale stakes 10^20 tokens (e.g. 100 with 18 decimals)
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&user, &coins(100_000_000_000_000_000_000u128, SEED)),
+        ExecuteMsg::Stake {},
+    )
+    .unwrap();
+
+    // Distributing 1 micro-USDT: 1 * 10^18 / 10^20 = 0 in Decimal256!
+    // Must be rejected to avoid trapping funds in REWARDS_RESERVED.
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::Distribute {
+            amount: Uint128::new(1),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::InvalidAmount));
+}
+
+#[test]
+fn open_position_high_notional_no_overflow() {
+    let mut deps = mock_dependencies();
+    let admin = addr20("admin");
+
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        InstantiateMsg {
+            admin: admin.to_string(),
+            seed_denom: SEED.to_string(),
+            treasury_denom: USDT.to_string(),
+            keeper: None,
+            max_leverage: Decimal::from_ratio(5u128, 1u128),
+            max_position_size: Uint128::MAX,
+            max_total_margin_bps: 10_000,
+            allowed_markets: vec![MARKET_1.to_string()],
+        },
+    )
+    .unwrap();
+
+    let initial_treasury = 300_000_000_000_000_000_000_000_000_000_000_000_000u128;
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &coins(initial_treasury, USDT)),
+        ExecuteMsg::DepositTreasury {},
+    )
+    .unwrap();
+
+    // qty = 2 * 10^19 (fits in u128)
+    // price = 2.5 * 10^19 (fits in u128)
+    // qty * price = 5 * 10^38 > u128::MAX (~3.4 * 10^38)
+    // margin = 2 * 10^38 (fits in u128)
+    // leverage = 5 * 10^38 / 2 * 10^38 = 2.5x <= max_leverage 5x
+    let qty_str = "20000000000000000000";
+    let price_str = "25000000000000000000";
+    let margin_str = "200000000000000000000000000000000000000";
+
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: MARKET_1.to_string(),
+            is_buy: true,
+            quantity: qty_str.to_string(),
+            price: price_str.to_string(),
+            margin: margin_str.to_string(),
+            leverage: None,
+        },
+    );
+    assert!(res.is_ok());
+}

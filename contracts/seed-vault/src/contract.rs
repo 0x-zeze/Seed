@@ -1,6 +1,6 @@
 use cosmwasm_std::{
     entry_point, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Decimal, Decimal256, Deps,
-    DepsMut, Env, Int128, MessageInfo, Response, StdError, StdResult, Uint128,
+    DepsMut, Env, Int128, MessageInfo, Response, StdError, StdResult, Uint128, Uint256,
 };
 use cw2::set_contract_version;
 use injective_cosmwasm::{InjectiveMsgWrapper, InjectiveQueryWrapper};
@@ -223,9 +223,14 @@ fn distribute(
         });
     }
 
+    let increment = Decimal256::from_ratio(amount, total);
+    if increment.is_zero() {
+        return Err(ContractError::InvalidAmount);
+    }
+
     let new_index = GLOBAL_INDEX.update(deps.storage, |index| -> Result<_, ContractError> {
         index
-            .checked_add(Decimal256::from_ratio(amount, total))
+            .checked_add(increment)
             .map_err(|err| ContractError::Std(StdError::msg(err)))
     })?;
     TOTAL_DISTRIBUTED.update(deps.storage, |done| add_u128(done, amount))?;
@@ -443,13 +448,13 @@ fn open_position(
     }
 
     if !price_u128.is_zero() {
-        let notional = qty_u128
-            .checked_mul(price_u128)
+        let notional_256 = Uint256::from(qty_u128)
+            .checked_mul(Uint256::from(price_u128))
             .map_err(|e| ContractError::Std(StdError::msg(e)))?;
         let max_notional = Decimal256::from(config.max_leverage)
             .checked_mul(Decimal256::from_ratio(margin_u128, 1u128))
             .map_err(|e| ContractError::Std(StdError::msg(e)))?;
-        if Decimal256::from_ratio(notional, 1u128) > max_notional {
+        if Decimal256::from_ratio(notional_256, 1u128) > max_notional {
             return Err(ContractError::RiskLimit {
                 reason: "notional exceeds max leverage limit".to_string(),
             });
