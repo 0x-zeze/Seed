@@ -1,0 +1,39 @@
+[package]
+name = "seed-vault"
+version = "0.1.0"
+authors = ["Seed"]
+edition = "2021"
+description = "CosmWasm vault that stakes $SEED and deploys treasury margin on Injective iAsset perpetuals."
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+library = []
+
+[dependencies]
+cosmwasm-schema = "3.0.2"
+cosmwasm-std = "3.0.5"
+cw-storage-plus = "3.0.1"
+cw2 = "3.0.0"
+injective-cosmwasm = "0.3.7"
+injective-math = "0.3.7"
+schemars = "0.8.22"
+serde = { version = "1.0.219", default-features = false, features = ["derive"] }
+thiserror = "2.0.12"
+
+[dev-dependencies]
+bech32 = "0.11"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+debug = false
+rpath = false
+lto = true
+debug-assertions = false
+codegen-units = 1
+panic = "abort"
+incremental = false
+overflow-checks = true
