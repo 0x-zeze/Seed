@@ -3,6 +3,7 @@ name = "seed-vault"
 version = "0.1.0"
 authors = ["Seed"]
 edition = "2021"
+rust-version = "1.86"
 description = "CosmWasm vault that stakes $SEED and deploys treasury margin on Injective iAsset perpetuals."
 license = "Apache-2.0"
 
