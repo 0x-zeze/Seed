@@ -8,9 +8,11 @@ use injective_cosmwasm::{InjectiveMsgWrapper, InjectiveQueryWrapper};
 
 use crate::error::ContractError;
 use crate::helpers::{
-    add_i128, add_u128, coin_u128, ensure_not_paused, ensure_owner, ensure_trader_or_owner,
-    one_coin, pending_yield, settle, sub_u128,
+    add_u128, coin_u128, ensure_not_paused, ensure_owner, ensure_trader_or_owner, one_coin,
+    pending_yield, settle, sub_u128,
 };
+#[cfg(test)]
+use crate::helpers::add_i128;
 use crate::msg::{
     AmountResponse, ConfigResponse, DistributionInfoResponse, ExecuteMsg, InstantiateMsg,
     OpenPositionsResponse, PositionsResponse, QueryMsg, RiskConfigResponse,
@@ -524,30 +526,6 @@ fn parse_units(raw: &str, name: &str) -> Result<Uint128, ContractError> {
         .map_err(|_| StdError::msg(format!("invalid {name}")).into())
 }
 
-/// Only place that books realized PnL and releases reserved margin.
-/// `released` is the margin the exchange returns. The gap versus `reserved` is the PnL.
-fn apply_realized_pnl(
-    storage: &mut dyn cosmwasm_std::Storage,
-    reserved: Uint128,
-    released: Uint128,
-) -> Result<Int128, ContractError> {
-    let released_i = Int128::new(
-        i128::try_from(released.u128())
-            .map_err(|err| ContractError::Std(StdError::msg(err.to_string())))?,
-    );
-    let reserved_i = Int128::new(
-        i128::try_from(reserved.u128())
-            .map_err(|err| ContractError::Std(StdError::msg(err.to_string())))?,
-    );
-    let pnl = released_i
-        .checked_sub(reserved_i)
-        .map_err(|err| ContractError::Std(StdError::msg(err)))?;
-
-    REALIZED_PNL_NET.update(storage, |net| add_i128(net, pnl))?;
-    RESERVED_MARGIN.update(storage, |margin| sub_u128(margin, reserved))?;
-    TREASURY_BALANCE.update(storage, |free| add_u128(free, released))?;
-    Ok(pnl)
-}
 #[allow(clippy::too_many_arguments)]
 fn open_position(
     deps: DepsMut<InjectiveQueryWrapper>,
@@ -586,6 +564,13 @@ fn open_position(
     if qty_u128.is_zero() || margin_u128.is_zero() {
         return Err(ContractError::ZeroAmount);
     }
+    if price_u128.is_zero() {
+        return Err(ContractError::InvalidPrice);
+    }
+
+    if POSITIONS.has(deps.storage, &market_id) {
+        return Err(ContractError::PositionAlreadyOpen { market_id });
+    }
 
     if margin_u128 > config.max_position_margin || qty_u128 > config.max_position_size {
         return Err(ContractError::PositionTooLarge);
@@ -600,16 +585,14 @@ fn open_position(
         }
     }
 
-    if !price_u128.is_zero() {
-        let notional_256 = Uint256::from(qty_u128)
-            .checked_mul(Uint256::from(price_u128))
-            .map_err(|e| ContractError::Std(StdError::msg(e)))?;
-        let max_notional = Decimal256::from(config.max_leverage)
-            .checked_mul(Decimal256::from_ratio(margin_u128, 1u128))
-            .map_err(|e| ContractError::Std(StdError::msg(e)))?;
-        if Decimal256::from_ratio(notional_256, 1u128) > max_notional {
-            return Err(ContractError::LeverageTooHigh);
-        }
+    let notional_256 = Uint256::from(qty_u128)
+        .checked_mul(Uint256::from(price_u128))
+        .map_err(|e| ContractError::Std(StdError::msg(e)))?;
+    let max_notional = Decimal256::from(config.max_leverage)
+        .checked_mul(Decimal256::from_ratio(margin_u128, 1u128))
+        .map_err(|e| ContractError::Std(StdError::msg(e)))?;
+    if Decimal256::from_ratio(notional_256, 1u128) > max_notional {
+        return Err(ContractError::LeverageTooHigh);
     }
 
     let free_treasury = TREASURY_BALANCE.load(deps.storage)?;
@@ -637,14 +620,11 @@ fn open_position(
 
     let lev_val = if let Some(ref lev) = leverage {
         lev.clone()
-    } else if !price_u128.is_zero() && !margin_u128.is_zero() {
+    } else {
         let notional = Uint256::from(qty_u128)
             .checked_mul(Uint256::from(price_u128))
             .map_err(|e| ContractError::Std(StdError::msg(e)))?;
-        let lev_dec = Decimal256::from_ratio(notional, margin_u128);
-        lev_dec.to_string()
-    } else {
-        "1".to_string()
+        Decimal256::from_ratio(notional, margin_u128).to_string()
     };
 
     let pos = Position {
@@ -686,26 +666,42 @@ fn close_position(
     let config = CONFIG.load(deps.storage)?;
     ensure_trader_or_owner(&config, &info.sender)?;
 
+    let pos = POSITIONS
+        .may_load(deps.storage, &market_id)?
+        .ok_or_else(|| ContractError::PositionNotFound {
+            market_id: market_id.clone(),
+        })?;
+
     if let Some(ref q) = quantity {
         let qty = parse_units(q, "quantity")?;
         if qty.is_zero() {
             return Err(ContractError::ZeroAmount);
         }
+        if qty != pos.quantity {
+            return Err(ContractError::PartialCloseNotSupported);
+        }
     }
 
-    if let Some(pos) = POSITIONS.may_load(deps.storage, &market_id)? {
-        apply_realized_pnl(deps.storage, pos.margin, pos.margin)?;
-    }
+    // TODO: Replace this interim full close with chain-derived PnL. Query the
+    // Injective exchange module, settle the subaccount, and book the realized
+    // gap between reserved margin and the amount the exchange actually returns.
+    // Until then realized PnL stays 0: the caller cannot supply a PnL value,
+    // and the whole reserved margin is released back to free treasury.
+    RESERVED_MARGIN.update(deps.storage, |margin| sub_u128(margin, pos.margin))?;
+    TREASURY_BALANCE.update(deps.storage, |free| add_u128(free, pos.margin))?;
     POSITIONS.remove(deps.storage, &market_id);
-
-    // TODO: Query position from Injective exchange module and build reduce-only closing order.
 
     Ok(Response::new()
         .add_attribute("action", "close_position")
         .add_attribute("trader", info.sender)
         .add_attribute("market_id", &market_id)
         .add_attribute("market", &market_id)
-        .add_attribute("quantity", quantity.unwrap_or_else(|| "all".to_string())))
+        .add_attribute(
+            "quantity",
+            quantity.unwrap_or_else(|| pos.quantity.to_string()),
+        )
+        .add_attribute("margin_released", pos.margin)
+        .add_attribute("realized_pnl", "0"))
 }
 
 #[entry_point]

@@ -27,7 +27,7 @@
 
 - `Stake` / `Unstake` — 1:1 `$SEED`, no lock, no fee. Unstaking preserves accrued yield.
 - `DepositTreasury` / `Distribute` / `Claim` — MasterChef-style continuous reward index. Realized profit moves from free treasury into segregated rewards.
-- `OpenPosition` / `ClosePosition` — Injective derivative order execution, leverage limits, local margin reservation.
+- `OpenPosition` / `ClosePosition` — local accounting only. Opening checks the market allowlist, leverage, size, and exposure, then moves margin from free treasury into `RESERVED_MARGIN` and stores one position per market. Closing requires that position, releases the full reserved margin back to free treasury, and books realized PnL as 0. Exchange integration is **not implemented yet**: there is no subaccount deposit, no order placement, and no PnL read from the Injective chain. A caller cannot supply a PnL value. Partial close is rejected.
 - `Pause` / `Unpause` — Emergency circuit breaker. Halts new staking and trading while keeping withdrawals and claims open.
 
 ```powershell
@@ -35,7 +35,7 @@ cargo test --manifest-path contracts/seed-vault/Cargo.toml --lib
 cargo clippy --manifest-path contracts/seed-vault/Cargo.toml --all-targets -- -D warnings
 ```
 
-Pinned to `injective-cosmwasm` 0.3.7 and `cosmwasm-std` 3. Realized PnL is only paid after an owner `Distribute`, once the USDT is settled in the contract.
+Pinned to `injective-cosmwasm` 0.3.7 and `cosmwasm-std` 3. Realized PnL is only paid after an owner `Distribute`, once the USDT is settled in the contract. `ClosePosition` does not settle exchange PnL yet, so a close does not by itself create distributable profit.
 
 ## Documentation
 
@@ -77,7 +77,8 @@ The contract enforces programmatic safety invariants before any derivative posit
 - **Circuit Breaker (`paused`)**: Pausing immediately blocks `Stake`, `Distribute`, and `OpenPosition`, while guaranteeing unconditional access to `Unstake` and `Claim`.
 
 ## Next Steps
-- Test exchange replies with `injective-test-tube` once the Injective toolchain is available
+- Exchange integration is not implemented. Still to build: deposit margin to an Injective subaccount, place and reduce derivative orders, and book PnL from chain settlement instead of the current local zero-PnL close.
+- Test those exchange replies with `injective-test-tube` once the Injective toolchain is available
 - Deploy to testnet first
 
 **Project name**: Seed  

@@ -866,18 +866,23 @@ fn trader_can_open_and_close_positions() {
     .unwrap_err();
     assert!(matches!(err, ContractError::Unauthorized));
 
-    // Trader closes position successfully
+    // Trader closes the full position successfully
     let res = execute(
         deps.as_mut(),
         mock_env(),
         message_info(&trader, &[]),
         ExecuteMsg::ClosePosition {
             market_id: MARKET_1.to_string(),
-            quantity: Some("500".to_string()),
+            quantity: Some("1000".to_string()),
         },
     )
     .unwrap();
     assert_eq!(res.attributes[0].value, "close_position");
+    assert_eq!(RESERVED_MARGIN.load(&deps.storage).unwrap(), Uint128::zero());
+    assert_eq!(
+        TREASURY_BALANCE.load(&deps.storage).unwrap(),
+        Uint128::new(5_000_000)
+    );
 }
 #[test]
 fn trader_cannot_distribute_or_deposit_treasury_but_owner_can() {
@@ -1024,6 +1029,35 @@ fn pause_blocks_open_position_but_allows_close() {
     )
     .unwrap_err();
     assert!(matches!(err, ContractError::Paused));
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::Unpause {},
+    )
+    .unwrap();
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: MARKET_1.to_string(),
+            is_buy: true,
+            quantity: "1000".to_string(),
+            price: "1000".to_string(),
+            margin: "1000000".to_string(),
+            leverage: None,
+        },
+    )
+    .unwrap();
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::Pause {},
+    )
+    .unwrap();
 
     // ClosePosition succeeds even when paused
     let res = execute(
@@ -2047,7 +2081,7 @@ fn test_cooldown_active_rejection_and_resolution() {
             max_total_margin_bps: None,
             max_position_margin: None,
             cooldown_seconds: Some(60),
-            allowed_markets: None,
+            allowed_markets: Some(vec![MARKET_1.to_string(), "0xmarket_other".to_string()]),
         },
     )
     .unwrap();
@@ -2107,14 +2141,14 @@ fn test_cooldown_active_rejection_and_resolution() {
     .unwrap_err();
     assert!(matches!(err, ContractError::CooldownActive));
 
-    // Calling at t = 1060 (exactly 60s) succeeds!
+    // Calling at t = 1060 (exactly 60s) succeeds on a different market.
     env.block.time = cosmwasm_std::Timestamp::from_seconds(1_060);
     let res = execute(
         deps.as_mut(),
         env,
         message_info(&owner, &[]),
         ExecuteMsg::OpenPosition {
-            market_id: MARKET_1.to_string(),
+            market_id: "0xmarket_other".to_string(),
             is_buy: true,
             quantity: "1000".to_string(),
             price: "1000".to_string(),
@@ -2597,7 +2631,9 @@ fn test_action_events_emitted_on_positions_distribute_and_claim() {
     assert_eq!(attr("trader"), Some(owner.as_str()));
     assert_eq!(attr("market_id"), Some(MARKET_1));
     assert_eq!(attr("market"), Some(MARKET_1));
-    assert_eq!(attr("quantity"), Some("all"));
+    assert_eq!(attr("quantity"), Some("100"));
+    assert_eq!(attr("margin_released"), Some("1000"));
+    assert_eq!(attr("realized_pnl"), Some("0"));
 
     // Record PnL so distribute succeeds
     record_pnl(&mut deps.as_mut(), &owner, 1000);
@@ -3903,6 +3939,257 @@ fn test_close_position_on_delisted_market_releases_reserved_margin() {
     .unwrap();
     assert_eq!(state.reserved_margin, Uint128::zero());
     assert_eq!(state.balance, Uint128::new(10_000_000));
+}
+
+#[test]
+fn close_releases_full_margin_and_restores_exposure_capacity() {
+    let (mut deps, admin) = setup();
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &coins(10_000_000, USDT)),
+        ExecuteMsg::DepositTreasury {},
+    )
+    .unwrap();
+
+    // 50% of 10_000_000 is the exposure cap. Fill it with one position.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: MARKET_1.to_string(),
+            is_buy: true,
+            quantity: "1000".to_string(),
+            price: "1".to_string(),
+            margin: "5000000".to_string(),
+            leverage: None,
+        },
+    )
+    .unwrap();
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::UpdateConfig {
+            max_leverage: None,
+            max_position_size: None,
+            max_exposure_bps: None,
+            max_total_margin_bps: None,
+            max_position_margin: None,
+            cooldown_seconds: None,
+            allowed_markets: Some(vec![MARKET_1.to_string(), "0xmarket_other".to_string()]),
+        },
+    )
+    .unwrap();
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: "0xmarket_other".to_string(),
+            is_buy: true,
+            quantity: "100".to_string(),
+            price: "1".to_string(),
+            margin: "1000000".to_string(),
+            leverage: None,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::ExposureLimitExceeded));
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::ClosePosition {
+            market_id: MARKET_1.to_string(),
+            quantity: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(RESERVED_MARGIN.load(&deps.storage).unwrap(), Uint128::zero());
+    assert_eq!(
+        TREASURY_BALANCE.load(&deps.storage).unwrap(),
+        Uint128::new(10_000_000)
+    );
+    assert_eq!(REALIZED_PNL_NET.load(&deps.storage).unwrap(), Int128::zero());
+    assert!(!POSITIONS.has(&deps.storage, MARKET_1));
+
+    // Capacity is usable again once the reserved margin is released.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: "0xmarket_other".to_string(),
+            is_buy: false,
+            quantity: "1000".to_string(),
+            price: "1".to_string(),
+            margin: "5000000".to_string(),
+            leverage: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        RESERVED_MARGIN.load(&deps.storage).unwrap(),
+        Uint128::new(5_000_000)
+    );
+}
+
+#[test]
+fn close_nonexistent_position_fails() {
+    let (mut deps, admin) = setup();
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::ClosePosition {
+            market_id: MARKET_1.to_string(),
+            quantity: None,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::PositionNotFound { .. }));
+    assert_eq!(RESERVED_MARGIN.load(&deps.storage).unwrap(), Uint128::zero());
+}
+
+#[test]
+fn duplicate_open_on_same_market_fails() {
+    let (mut deps, admin) = setup();
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &coins(10_000_000, USDT)),
+        ExecuteMsg::DepositTreasury {},
+    )
+    .unwrap();
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: MARKET_1.to_string(),
+            is_buy: true,
+            quantity: "1000".to_string(),
+            price: "1000".to_string(),
+            margin: "1000000".to_string(),
+            leverage: None,
+        },
+    )
+    .unwrap();
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: MARKET_1.to_string(),
+            is_buy: false,
+            quantity: "500".to_string(),
+            price: "1000".to_string(),
+            margin: "500000".to_string(),
+            leverage: None,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::PositionAlreadyOpen { .. }));
+    assert_eq!(
+        RESERVED_MARGIN.load(&deps.storage).unwrap(),
+        Uint128::new(1_000_000)
+    );
+    assert_eq!(
+        TREASURY_BALANCE.load(&deps.storage).unwrap(),
+        Uint128::new(9_000_000)
+    );
+}
+
+#[test]
+fn open_position_rejects_zero_price() {
+    let (mut deps, admin) = setup();
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &coins(10_000_000, USDT)),
+        ExecuteMsg::DepositTreasury {},
+    )
+    .unwrap();
+
+    // quantity * 0 / margin would otherwise skip the notional leverage check.
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: MARKET_1.to_string(),
+            is_buy: true,
+            quantity: "10000000".to_string(),
+            price: "0".to_string(),
+            margin: "1000000".to_string(),
+            leverage: None,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::InvalidPrice));
+    assert_eq!(RESERVED_MARGIN.load(&deps.storage).unwrap(), Uint128::zero());
+    assert!(!POSITIONS.has(&deps.storage, MARKET_1));
+}
+
+#[test]
+fn partial_close_is_rejected_and_leaves_margin_reserved() {
+    let (mut deps, admin) = setup();
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &coins(10_000_000, USDT)),
+        ExecuteMsg::DepositTreasury {},
+    )
+    .unwrap();
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: MARKET_1.to_string(),
+            is_buy: true,
+            quantity: "1000".to_string(),
+            price: "1000".to_string(),
+            margin: "1000000".to_string(),
+            leverage: None,
+        },
+    )
+    .unwrap();
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::ClosePosition {
+            market_id: MARKET_1.to_string(),
+            quantity: Some("500".to_string()),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::PartialCloseNotSupported));
+    assert!(POSITIONS.has(&deps.storage, MARKET_1));
+    assert_eq!(
+        RESERVED_MARGIN.load(&deps.storage).unwrap(),
+        Uint128::new(1_000_000)
+    );
+    assert_eq!(
+        TREASURY_BALANCE.load(&deps.storage).unwrap(),
+        Uint128::new(9_000_000)
+    );
 }
 
 

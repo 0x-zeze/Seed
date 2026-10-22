@@ -53,4 +53,16 @@ pub enum ContractError {
 
     #[error("{msg} is not implemented")]
     NotImplemented { msg: String },
+
+    #[error("no open position for market {market_id}")]
+    PositionNotFound { market_id: String },
+
+    #[error("a position is already open for market {market_id}")]
+    PositionAlreadyOpen { market_id: String },
+
+    #[error("price must be greater than zero")]
+    InvalidPrice,
+
+    #[error("partial close is not supported")]
+    PartialCloseNotSupported,
 }
