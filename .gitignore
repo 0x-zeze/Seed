@@ -16,3 +16,8 @@ Thumbs.db
 *.csv
 Grahito_Portfolio_Sheet.xlsx
 
+# Testnet deployment toolkit
+scripts/testnet/node_modules
+scripts/testnet/.env
+scripts/testnet/state.json
+

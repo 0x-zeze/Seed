@@ -1,0 +1,24 @@
+{
+  "name": "seed-vault-testnet-scripts",
+  "version": "1.0.0",
+  "description": "Injective testnet deploy and smoke test toolkit for Seed Vault",
+  "type": "module",
+  "scripts": {
+    "store": "tsx src/store.ts",
+    "instantiate": "tsx src/instantiate.ts",
+    "smoke": "tsx src/smoke.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@injectivelabs/networks": "^1.20.61",
+    "@injectivelabs/sdk-ts": "^1.20.61",
+    "@injectivelabs/ts-types": "^1.20.61",
+    "@injectivelabs/utils": "^1.20.61",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
