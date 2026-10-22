@@ -1,0 +1,10 @@
+# Environment files and secrets
+.env
+**/.env
+.env.*
+scripts/testnet/.env
+
+# Sensitive spreadsheets
+*.xlsx
+*.xls
+Grahito_Portfolio_Sheet.xlsx

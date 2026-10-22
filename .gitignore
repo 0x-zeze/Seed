@@ -1,12 +1,24 @@
+# Build artifacts
 target/
 **/target/
 artifacts/
 **/artifacts/
+
+# Node dependencies
+node_modules/
+**/node_modules/
+
+# Environment files and credentials
 .env
 **/.env
+.env.*
+!.env.example
+
+# Temporary and editor files
 **/*.rs.bk
 *.swp
 *.bak
+*.tmp
 .DS_Store
 Thumbs.db
 
@@ -16,8 +28,7 @@ Thumbs.db
 *.csv
 Grahito_Portfolio_Sheet.xlsx
 
-# Testnet deployment toolkit
-scripts/testnet/node_modules
-scripts/testnet/.env
+# Testnet deployment state
 scripts/testnet/state.json
+
 
