@@ -4,3 +4,10 @@
 *.bak
 .DS_Store
 Thumbs.db
+
+# Private spreadsheets and financial documents
+*.xlsx
+*.xls
+*.csv
+Grahito_Portfolio_Sheet.xlsx
+
