@@ -1,6 +1,18 @@
-use cosmwasm_std::testing::{message_info, mock_env};
-use cosmwasm_std::{coin, coins, from_json, BankMsg, Coin, CosmosMsg, Decimal, Decimal256, Int128, Uint128};
-use injective_cosmwasm::mock_dependencies;
+use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env};
+use cosmwasm_std::{
+    coin, coins, from_json, BankMsg, Coin, CosmosMsg, Decimal, Decimal256, Int128, Uint128,
+};
+
+fn inj_deps() -> cosmwasm_std::OwnedDeps<
+    cosmwasm_std::testing::MockStorage,
+    cosmwasm_std::testing::MockApi,
+    cosmwasm_std::testing::MockQuerier,
+    cosmwasm_std::Empty,
+> {
+    let mut deps = mock_dependencies();
+    deps.api = deps.api.with_prefix("inj");
+    deps
+}
 
 use crate::addresses::addr20;
 use crate::contract::{execute, instantiate, query};
@@ -23,7 +35,7 @@ const MARKET_1: &str = "0xmarket1";
 
 #[test]
 fn instantiate_stores_config_and_zero_counters() {
-    let mut deps = mock_dependencies();
+    let mut deps = inj_deps();
     let env = mock_env();
     let owner = addr20("owner");
     let info = message_info(&owner, &[]);
@@ -97,12 +109,12 @@ fn setup() -> (
     cosmwasm_std::OwnedDeps<
         cosmwasm_std::testing::MockStorage,
         cosmwasm_std::testing::MockApi,
-        injective_cosmwasm::WasmMockQuerier,
-        injective_cosmwasm::InjectiveQueryWrapper,
+        cosmwasm_std::testing::MockQuerier,
+        cosmwasm_std::Empty,
     >,
     cosmwasm_std::Addr,
 ) {
-    let mut deps = mock_dependencies();
+    let mut deps = inj_deps();
     let owner = addr20("owner");
     instantiate(
         deps.as_mut(),
@@ -127,7 +139,7 @@ fn setup() -> (
 }
 
 fn stake(
-    deps: &mut cosmwasm_std::DepsMut<injective_cosmwasm::InjectiveQueryWrapper>,
+    deps: &mut cosmwasm_std::DepsMut<cosmwasm_std::Empty>,
     user: &cosmwasm_std::Addr,
     amount: u128,
 ) {
@@ -141,7 +153,7 @@ fn stake(
 }
 
 fn record_pnl(
-    deps: &mut cosmwasm_std::DepsMut<injective_cosmwasm::InjectiveQueryWrapper>,
+    deps: &mut cosmwasm_std::DepsMut<cosmwasm_std::Empty>,
     admin: &cosmwasm_std::Addr,
     delta: i128,
 ) {
@@ -157,7 +169,7 @@ fn record_pnl(
 }
 
 fn deposit(
-    deps: &mut cosmwasm_std::DepsMut<injective_cosmwasm::InjectiveQueryWrapper>,
+    deps: &mut cosmwasm_std::DepsMut<cosmwasm_std::Empty>,
     admin: &cosmwasm_std::Addr,
     amount: u128,
 ) {
@@ -607,7 +619,7 @@ fn owner_transfer_requires_acceptance() {
 }
 
 fn distribute(
-    deps: &mut cosmwasm_std::DepsMut<injective_cosmwasm::InjectiveQueryWrapper>,
+    deps: &mut cosmwasm_std::DepsMut<cosmwasm_std::Empty>,
     admin: &cosmwasm_std::Addr,
     amount: u128,
 ) {
@@ -623,9 +635,9 @@ fn distribute(
 }
 
 fn claim(
-    deps: &mut cosmwasm_std::DepsMut<injective_cosmwasm::InjectiveQueryWrapper>,
+    deps: &mut cosmwasm_std::DepsMut<cosmwasm_std::Empty>,
     user: &cosmwasm_std::Addr,
-) -> cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper> {
+) -> cosmwasm_std::Response<cosmwasm_std::Empty> {
     execute(
         deps.branch(),
         mock_env(),
@@ -798,7 +810,7 @@ fn open_position_enforces_limits_and_reserves_margin() {
 
 #[test]
 fn trader_can_open_and_close_positions() {
-    let mut deps = mock_dependencies();
+    let mut deps = inj_deps();
     let owner = addr20("owner");
     let trader = addr20("trader");
     let stranger = addr20("stranger");
@@ -886,7 +898,7 @@ fn trader_can_open_and_close_positions() {
 }
 #[test]
 fn trader_cannot_distribute_or_deposit_treasury_but_owner_can() {
-    let mut deps = mock_dependencies();
+    let mut deps = inj_deps();
     let owner = addr20("owner");
     let trader = addr20("trader");
     let stranger = addr20("stranger");
@@ -1074,7 +1086,7 @@ fn pause_blocks_open_position_but_allows_close() {
 }
 
 fn sent_usdt(
-    res: &cosmwasm_std::Response<injective_cosmwasm::InjectiveMsgWrapper>,
+    res: &cosmwasm_std::Response<cosmwasm_std::Empty>,
     user: &cosmwasm_std::Addr,
     amount: u128,
 ) {
@@ -1290,7 +1302,7 @@ fn claimed_total(storage: &dyn cosmwasm_std::Storage, users: &[cosmwasm_std::Add
 }
 
 fn pending(
-    deps: &cosmwasm_std::Deps<injective_cosmwasm::InjectiveQueryWrapper>,
+    deps: &cosmwasm_std::Deps<cosmwasm_std::Empty>,
     user: &cosmwasm_std::Addr,
 ) -> Uint128 {
     let bin = query(
@@ -1381,7 +1393,7 @@ fn pending_yield_matches_the_claim_payout() {
 
 #[test]
 fn distribute_too_small_for_index_is_rejected() {
-    let mut deps = mock_dependencies();
+    let mut deps = inj_deps();
     let admin = addr20("admin");
     let user = addr20("whale");
 
@@ -1450,7 +1462,7 @@ fn distribute_too_small_for_index_is_rejected() {
 
 #[test]
 fn open_position_high_notional_no_overflow() {
-    let mut deps = mock_dependencies();
+    let mut deps = inj_deps();
     let admin = addr20("admin");
 
     instantiate(
@@ -1811,7 +1823,7 @@ fn update_config_by_owner_and_unauthorized_checks() {
 
 #[test]
 fn trader_cannot_execute_owner_administrative_functions() {
-    let mut deps = mock_dependencies();
+    let mut deps = inj_deps();
     let owner = addr20("owner");
     let trader = addr20("trader");
 
@@ -2212,7 +2224,7 @@ fn test_open_position_success_and_risk_config_query() {
 }
 #[test]
 fn test_instantiate_and_update_validation() {
-    let mut deps = mock_dependencies();
+    let mut deps = inj_deps();
     let owner = addr20("owner");
 
     // 1. max_leverage < 1 rejected on instantiate
@@ -3097,7 +3109,7 @@ fn test_claim_twice_does_not_pay_twice() {
 
 #[test]
 fn test_role_permissions_non_trader_cannot_open_and_trader_cannot_call_owner_messages() {
-    let mut deps = mock_dependencies();
+    let mut deps = inj_deps();
     let owner = addr20("owner");
     let trader = addr20("trader");
     let stranger = addr20("stranger");
@@ -3793,7 +3805,7 @@ fn test_multiple_stakers_multiple_rounds_exact_payouts_and_dust_accounting() {
 
 #[test]
 fn test_close_position_on_delisted_market_releases_reserved_margin() {
-    let mut deps = mock_dependencies();
+    let mut deps = inj_deps();
     let owner = addr20("owner");
     let trader = addr20("trader");
     let delisted_market = MARKET_1;

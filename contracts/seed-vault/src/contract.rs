@@ -1,10 +1,10 @@
 use cosmwasm_std::{
     entry_point, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Decimal, Decimal256, Deps,
-    DepsMut, Env, Int128, MessageInfo, Order, Response, StdError, StdResult, Uint128, Uint256,
+    DepsMut, Empty, Env, Int128, MessageInfo, Order, Response, StdError, StdResult, Uint128,
+    Uint256,
 };
 use cw_storage_plus::Bound;
 use cw2::set_contract_version;
-use injective_cosmwasm::{InjectiveMsgWrapper, InjectiveQueryWrapper};
 
 use crate::error::ContractError;
 use crate::helpers::{
@@ -27,11 +27,11 @@ use crate::state::{
 
 #[entry_point]
 pub fn instantiate(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     _env: Env,
     _info: MessageInfo,
     msg: InstantiateMsg,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     if msg.seed_denom.is_empty() || msg.treasury_denom.is_empty() {
         return Err(StdError::msg("seed and treasury denom are required").into());
     }
@@ -105,11 +105,11 @@ pub fn instantiate(
 
 #[entry_point]
 pub fn execute(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     env: Env,
     info: MessageInfo,
     msg: ExecuteMsg,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     match msg {
         ExecuteMsg::Stake {} => stake(deps, info),
         ExecuteMsg::Unstake { amount } => unstake(deps, info, amount),
@@ -160,9 +160,9 @@ pub fn execute(
 }
 
 fn stake(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     info: MessageInfo,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
     ensure_not_paused(&config)?;
     let amount = coin_u128(one_coin(&info.funds, &config.seed_denom)?.amount)?;
@@ -183,10 +183,10 @@ fn stake(
 }
 
 fn unstake(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     info: MessageInfo,
     amount: Uint128,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     if amount.is_zero() {
         return Err(ContractError::ZeroAmount);
     }
@@ -221,9 +221,9 @@ fn unstake(
 }
 
 fn deposit_treasury(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     info: MessageInfo,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
     ensure_owner(&config, &info.sender)?;
     let amount = coin_u128(one_coin(&info.funds, &config.treasury_denom)?.amount)?;
@@ -241,11 +241,11 @@ fn deposit_treasury(
 
 /// Profit above the high-water mark moves from free treasury into the reward index.
 fn distribute(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     env: Env,
     info: MessageInfo,
     amount: Uint128,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
     ensure_owner(&config, &info.sender)?;
     ensure_not_paused(&config)?;
@@ -308,10 +308,10 @@ fn distributable_profit(net: Int128, distributed: Uint128) -> Result<Uint128, Co
 }
 
 fn set_paused(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     info: MessageInfo,
     paused: bool,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     let mut config = CONFIG.load(deps.storage)?;
     ensure_owner(&config, &info.sender)?;
     config.paused = paused;
@@ -323,10 +323,10 @@ fn set_paused(
 }
 
 fn propose_owner(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     info: MessageInfo,
     new_owner: String,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
     ensure_owner(&config, &info.sender)?;
     let pending = deps.api.addr_validate(&new_owner)?;
@@ -342,9 +342,9 @@ fn propose_owner(
 }
 
 fn accept_owner(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     info: MessageInfo,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     let pending = PENDING_OWNER
         .may_load(deps.storage)?
         .ok_or(ContractError::Unauthorized)?;
@@ -366,10 +366,10 @@ fn accept_owner(
 }
 
 fn update_trader(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     info: MessageInfo,
     new_trader: Option<String>,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     let mut config = CONFIG.load(deps.storage)?;
     ensure_owner(&config, &info.sender)?;
 
@@ -393,7 +393,7 @@ fn update_trader(
 
 #[allow(clippy::too_many_arguments)]
 fn update_config(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     info: MessageInfo,
     max_leverage: Option<Decimal>,
     max_position_size: Option<Uint128>,
@@ -402,7 +402,7 @@ fn update_config(
     max_position_margin: Option<Uint128>,
     cooldown_seconds: Option<u64>,
     allowed_markets: Option<Vec<String>>,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     let mut config = CONFIG.load(deps.storage)?;
     ensure_owner(&config, &info.sender)?;
 
@@ -473,9 +473,9 @@ fn update_config(
 
 /// Pays settled yield. Open while paused so users can always collect what they earned.
 fn claim(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     info: MessageInfo,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     settle(deps.storage, &info.sender)?;
     let amount = USER_PENDING
         .may_load(deps.storage, &info.sender)?
@@ -508,10 +508,10 @@ fn claim(
 /// TEMPORARY until `ClosePosition` updates realized PnL from released margin.
 #[cfg(test)]
 fn record_pnl(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     info: MessageInfo,
     delta: Int128,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
     ensure_owner(&config, &info.sender)?;
     REALIZED_PNL_NET.update(deps.storage, |net| add_i128(net, delta))?;
@@ -528,7 +528,7 @@ fn parse_units(raw: &str, name: &str) -> Result<Uint128, ContractError> {
 
 #[allow(clippy::too_many_arguments)]
 fn open_position(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     env: Env,
     info: MessageInfo,
     market_id: String,
@@ -537,7 +537,7 @@ fn open_position(
     price: String,
     margin: String,
     leverage: Option<String>,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
     ensure_trader_or_owner(&config, &info.sender)?;
     ensure_not_paused(&config)?;
@@ -638,11 +638,11 @@ fn open_position(
     };
     POSITIONS.save(deps.storage, &market_id, &pos)?;
 
-    // TODO: Build the Injective derivative order as CosmosMsg::Any or InjectiveMsgWrapper
-    // using injective-std / injective-cosmwasm types once the exchange subaccount id and
+    // TODO: Build the Injective derivative order as CosmosMsg::Any
+    // using injective-std types once the exchange subaccount id and
     // protobuf wire encoding are finalized. Returning empty message list for now.
     let _ = (is_buy, price_u128);
-    let messages: Vec<CosmosMsg<InjectiveMsgWrapper>> = vec![];
+    let messages: Vec<CosmosMsg<Empty>> = vec![];
 
     Ok(Response::new()
         .add_messages(messages)
@@ -658,11 +658,11 @@ fn open_position(
 }
 
 fn close_position(
-    deps: DepsMut<InjectiveQueryWrapper>,
+    deps: DepsMut<Empty>,
     info: MessageInfo,
     market_id: String,
     quantity: Option<String>,
-) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+) -> Result<Response<Empty>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
     ensure_trader_or_owner(&config, &info.sender)?;
 
@@ -705,7 +705,7 @@ fn close_position(
 }
 
 #[entry_point]
-pub fn query(deps: Deps<InjectiveQueryWrapper>, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
+pub fn query(deps: Deps<Empty>, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::Config {} => to_json_binary(&query_config(deps)?),
         QueryMsg::UserStake { user } => to_json_binary(&query_user_stake(deps, user)?),
@@ -727,7 +727,7 @@ pub fn query(deps: Deps<InjectiveQueryWrapper>, _env: Env, msg: QueryMsg) -> Std
     }
 }
 
-fn query_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<ConfigResponse> {
+fn query_config(deps: Deps<Empty>) -> StdResult<ConfigResponse> {
     let config = CONFIG.load(deps.storage)?;
     Ok(ConfigResponse {
         seed_token: config.seed_denom,
@@ -745,7 +745,7 @@ fn query_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<ConfigResponse> 
     })
 }
 
-fn query_risk_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<RiskConfigResponse> {
+fn query_risk_config(deps: Deps<Empty>) -> StdResult<RiskConfigResponse> {
     let config = CONFIG.load(deps.storage)?;
     let free_treasury = TREASURY_BALANCE.load(deps.storage)?;
     let reserved = RESERVED_MARGIN.load(deps.storage)?;
@@ -772,7 +772,7 @@ fn query_risk_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<RiskConfigR
 }
 
 fn query_user_stake(
-    deps: Deps<InjectiveQueryWrapper>,
+    deps: Deps<Empty>,
     user: String,
 ) -> StdResult<UserStakeResponse> {
     let user = deps.api.addr_validate(&user)?;
@@ -783,14 +783,14 @@ fn query_user_stake(
     })
 }
 
-fn query_pending(deps: Deps<InjectiveQueryWrapper>, user: String) -> StdResult<AmountResponse> {
+fn query_pending(deps: Deps<Empty>, user: String) -> StdResult<AmountResponse> {
     let user = deps.api.addr_validate(&user)?;
     Ok(AmountResponse {
         amount: pending_yield(deps.storage, &user)?,
     })
 }
 
-fn query_user_info(deps: Deps<InjectiveQueryWrapper>, user: String) -> StdResult<UserInfoResponse> {
+fn query_user_info(deps: Deps<Empty>, user: String) -> StdResult<UserInfoResponse> {
     let user = deps.api.addr_validate(&user)?;
     let stake = USER_STAKE
         .may_load(deps.storage, &user)?
@@ -811,7 +811,7 @@ fn query_user_info(deps: Deps<InjectiveQueryWrapper>, user: String) -> StdResult
     })
 }
 
-fn query_distribution(deps: Deps<InjectiveQueryWrapper>) -> StdResult<DistributionInfoResponse> {
+fn query_distribution(deps: Deps<Empty>) -> StdResult<DistributionInfoResponse> {
     Ok(DistributionInfoResponse {
         total_distributed: TOTAL_DISTRIBUTED.load(deps.storage)?,
         rewards_reserved: REWARDS_RESERVED.load(deps.storage)?,
@@ -820,7 +820,7 @@ fn query_distribution(deps: Deps<InjectiveQueryWrapper>) -> StdResult<Distributi
     })
 }
 
-fn query_treasury_state(deps: Deps<InjectiveQueryWrapper>) -> StdResult<TreasuryStateResponse> {
+fn query_treasury_state(deps: Deps<Empty>) -> StdResult<TreasuryStateResponse> {
     let balance = TREASURY_BALANCE.load(deps.storage)?;
     let reserved_margin = RESERVED_MARGIN.load(deps.storage)?;
     let net = REALIZED_PNL_NET.load(deps.storage)?;
@@ -835,7 +835,7 @@ fn query_treasury_state(deps: Deps<InjectiveQueryWrapper>) -> StdResult<Treasury
     })
 }
 
-fn query_positions(deps: Deps<InjectiveQueryWrapper>) -> StdResult<PositionsResponse> {
+fn query_positions(deps: Deps<Empty>) -> StdResult<PositionsResponse> {
     let positions = POSITIONS
         .range(deps.storage, None, None, Order::Ascending)
         .take(100)
@@ -846,7 +846,7 @@ fn query_positions(deps: Deps<InjectiveQueryWrapper>) -> StdResult<PositionsResp
 }
 
 fn query_open_positions(
-    deps: Deps<InjectiveQueryWrapper>,
+    deps: Deps<Empty>,
     start_after: Option<String>,
     limit: Option<u32>,
 ) -> StdResult<OpenPositionsResponse> {
