@@ -39,16 +39,15 @@ Pinned to `injective-cosmwasm` 0.3.7 and `cosmwasm-std` 3. Realized PnL is only 
 
 ## Documentation
 
-The complete architectural specification, state schemas, and execution logic are consolidated into a single technical reference document:
+All architectural specifications and message schemas are organized in the [`docs/`](docs/) directory:
 
-- **[`docs/specifications.md`](docs/specifications.md)** — Comprehensive Seed Vault Specification:
-  - Architecture & 3-Tier Accounting
-  - Staking (`Stake`, `Unstake`)
-  - Treasury & Position Management (`DepositTreasury`, `OpenPosition`, `ClosePosition`)
-  - Continuous Reward Index & Yield Distribution (`Distribute`, `Claim`)
-  - 2-Step Governance & Risk Engine
-  - Full Query Interface & Response Schemas
-  - Mathematical Invariants & Solvency Guarantees
+- [`docs/stake.md`](docs/stake.md) — Staking `$SEED` into the vault.
+- [`docs/unstake.md`](docs/unstake.md) — Withdrawing `$SEED` (remains open during pause).
+- [`docs/deposit_treasury.md`](docs/deposit_treasury.md) — Owner depositing USDT margin into the treasury pool.
+- [`docs/distribute.md`](docs/distribute.md) — Yield distribution logic, high-water mark validation, and global index accrual.
+- [`docs/manage_position.md`](docs/manage_position.md) — Opening and closing Injective iAsset perpetual derivative positions.
+- [`docs/claim_yield.md`](docs/claim_yield.md) — Staker reward claiming, lazy `settle` accounting, and rounding dust solvency.
+- [`docs/queries.md`](docs/queries.md) — Read-only state queries for frontend integration (`Config`, `TreasuryState`, `OpenPositions`, `RiskConfig`, `UserInfo`, etc.).
 
 ## Risks
 
