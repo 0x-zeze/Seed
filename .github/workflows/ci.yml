@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  contract:
+    name: Contract Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (MSRV 1.86.0)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.86.0
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "contracts/seed-vault -> contracts/seed-vault/target"
+
+      - name: Run unit tests
+        run: cargo test --manifest-path contracts/seed-vault/Cargo.toml --locked
+
+      - name: Run clippy
+        run: cargo clippy --manifest-path contracts/seed-vault/Cargo.toml --all-targets --locked -- -D warnings
+
+      - name: Compile check for wasm32
+        run: cargo check --manifest-path contracts/seed-vault/Cargo.toml --target wasm32-unknown-unknown --locked
+
+  scripts:
+    name: TypeScript Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: 'scripts/testnet/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci --prefix scripts/testnet
+
+      - name: Run typecheck
+        run: npm --prefix scripts/testnet run typecheck
