@@ -7,22 +7,26 @@ pub const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cw_serde]
 pub struct Config {
-    pub admin: Addr,
+    pub owner: Addr,
     /// Native `$SEED` denom from Sprout.fun (TokenFactory).
     pub seed_denom: String,
     /// Margin / yield denom, e.g. a peggy USDT denom.
     pub treasury_denom: String,
     pub paused: bool,
-    /// Keeper may open and close positions. `None` means admin only.
-    pub keeper: Option<Addr>,
-    /// Maximum leverage, e.g. `3` means 3x. Compared against margin and notional.
+    /// Trader may open and close positions. `None` means owner only.
+    pub trader: Option<Addr>,
+    /// Markets the vault is allowed to trade. Empty means none.
+    pub allowed_markets: Vec<String>,
+    /// Maximum leverage, e.g. `3` means 3x. Compared against margin and notional. Default 3x.
     pub max_leverage: Decimal,
     /// Maximum order quantity, in the market's base units.
     pub max_position_size: Uint128,
-    /// Share of free treasury plus already reserved margin that may be reserved, in basis points.
-    pub max_total_margin_bps: u16,
-    /// Markets the vault is allowed to trade. Empty means none.
-    pub allowed_markets: Vec<String>,
+    /// Total reserved margin across open positions must be <= this % of treasury in bps. Default 5000 (50%).
+    pub max_exposure_bps: u16,
+    /// Cap per single position's margin.
+    pub max_position_margin: Uint128,
+    /// Minimum time in seconds between two OpenPosition calls.
+    pub cooldown_seconds: u64,
 }
 
 pub const CONFIG: Item<Config> = Item::new("config");
@@ -54,5 +58,24 @@ pub const REALIZED_PNL_NET: Item<Int128> = Item::new("realized_pnl_net");
 /// Block height of the last successful distribution. Zero before the first.
 pub const LAST_DISTRIBUTION: Item<u64> = Item::new("last_distribution");
 
-/// Second step of an admin transfer. Empty until `ProposeAdmin`.
-pub const PENDING_ADMIN: Item<Addr> = Item::new("pending_admin");
+/// Second step of an ownership transfer. Empty until `ProposeOwner`.
+pub const PENDING_OWNER: Item<Addr> = Item::new("pending_owner");
+
+
+/// Timestamp (in seconds) of the last OpenPosition call. Zero before the first.
+pub const LAST_POSITION_OPENED: Item<u64> = Item::new("last_position_opened");
+
+#[cw_serde]
+pub struct Position {
+    pub market_id: String,
+    pub is_buy: bool,
+    pub quantity: Uint128,
+    pub price: Uint128,
+    pub margin: Uint128,
+    pub leverage: Option<String>,
+    pub opened_at: u64,
+}
+
+/// Active open positions keyed by market_id.
+pub const POSITIONS: Map<&str, Position> = Map::new("positions");
+

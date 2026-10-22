@@ -5,11 +5,19 @@ use cosmwasm_std::{
 use crate::error::ContractError;
 use crate::state::{Config, GLOBAL_INDEX, USER_INDEX, USER_PENDING, USER_STAKE};
 
-pub fn ensure_admin(config: &Config, sender: &Addr) -> Result<(), ContractError> {
-    if sender != config.admin {
+pub fn ensure_owner(config: &Config, sender: &Addr) -> Result<(), ContractError> {
+    if sender != config.owner {
         return Err(ContractError::Unauthorized);
     }
     Ok(())
+}
+
+pub fn ensure_trader_or_owner(config: &Config, sender: &Addr) -> Result<(), ContractError> {
+    if sender == config.owner || config.trader.as_ref() == Some(sender) {
+        Ok(())
+    } else {
+        Err(ContractError::Unauthorized)
+    }
 }
 
 pub fn ensure_not_paused(config: &Config) -> Result<(), ContractError> {

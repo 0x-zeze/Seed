@@ -1,23 +1,26 @@
 use cosmwasm_std::{
     entry_point, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Decimal, Decimal256, Deps,
-    DepsMut, Env, Int128, MessageInfo, Response, StdError, StdResult, Uint128, Uint256,
+    DepsMut, Env, Int128, MessageInfo, Order, Response, StdError, StdResult, Uint128, Uint256,
 };
+use cw_storage_plus::Bound;
 use cw2::set_contract_version;
 use injective_cosmwasm::{InjectiveMsgWrapper, InjectiveQueryWrapper};
 
 use crate::error::ContractError;
 use crate::helpers::{
-    add_i128, add_u128, coin_u128, ensure_admin, ensure_not_paused, one_coin, pending_yield,
-    settle, sub_u128,
+    add_i128, add_u128, coin_u128, ensure_not_paused, ensure_owner, ensure_trader_or_owner,
+    one_coin, pending_yield, settle, sub_u128,
 };
 use crate::msg::{
     AmountResponse, ConfigResponse, DistributionInfoResponse, ExecuteMsg, InstantiateMsg,
-    PositionsResponse, QueryMsg, UserInfoResponse, UserStakeResponse,
+    OpenPositionsResponse, PositionsResponse, QueryMsg, RiskConfigResponse,
+    TreasuryStateResponse, UserInfoResponse, UserStakeResponse,
 };
 use crate::state::{
-    Config, CONFIG, CONTRACT_NAME, CONTRACT_VERSION, GLOBAL_INDEX, LAST_DISTRIBUTION,
-    PENDING_ADMIN, REALIZED_PNL_NET, RESERVED_MARGIN, REWARDS_RESERVED, TOTAL_DISTRIBUTED,
-    TOTAL_STAKED, TREASURY_BALANCE, USER_CLAIMED, USER_PENDING, USER_STAKE,
+    Config, Position, CONFIG, CONTRACT_NAME, CONTRACT_VERSION, GLOBAL_INDEX, LAST_DISTRIBUTION,
+    LAST_POSITION_OPENED, PENDING_OWNER, POSITIONS, REALIZED_PNL_NET, RESERVED_MARGIN,
+    REWARDS_RESERVED, TOTAL_DISTRIBUTED, TOTAL_STAKED, TREASURY_BALANCE, USER_CLAIMED,
+    USER_PENDING, USER_STAKE,
 };
 
 #[entry_point]
@@ -34,27 +37,49 @@ pub fn instantiate(
         return Err(StdError::msg("seed and treasury denom must differ").into());
     }
 
-    if msg.max_total_margin_bps > 10_000 {
-        return Err(StdError::msg("max_total_margin_bps cannot exceed 10000").into());
-    }
-    if msg.max_leverage < Decimal::one() {
+    let max_leverage = msg
+        .max_leverage
+        .unwrap_or_else(|| Decimal::from_ratio(3u128, 1u128));
+    if max_leverage < Decimal::one() {
         return Err(StdError::msg("max_leverage must be at least 1").into());
     }
 
+    let max_exposure_bps = msg
+        .max_exposure_bps
+        .or(msg.max_total_margin_bps)
+        .unwrap_or(5000);
+    if max_exposure_bps > 10_000 {
+        return Err(StdError::msg("max_exposure_bps cannot exceed 10000").into());
+    }
+
+    let max_position_margin = msg.max_position_margin.unwrap_or(Uint128::MAX);
+    if max_position_margin.is_zero() {
+        return Err(StdError::msg("max_position_margin must be greater than zero").into());
+    }
+
+    let max_position_size = msg.max_position_size.unwrap_or(Uint128::MAX);
+    if max_position_size.is_zero() {
+        return Err(StdError::msg("max_position_size must be greater than zero").into());
+    }
+
+    let cooldown_seconds = msg.cooldown_seconds.unwrap_or(0);
+
     let config = Config {
-        admin: deps.api.addr_validate(&msg.admin)?,
+        owner: deps.api.addr_validate(&msg.owner)?,
         seed_denom: msg.seed_denom,
         treasury_denom: msg.treasury_denom,
         paused: false,
-        keeper: msg
-            .keeper
+        trader: msg
+            .trader
             .as_deref()
-            .map(|keeper| deps.api.addr_validate(keeper))
+            .map(|trader| deps.api.addr_validate(trader))
             .transpose()?,
-        max_leverage: msg.max_leverage,
-        max_position_size: msg.max_position_size,
-        max_total_margin_bps: msg.max_total_margin_bps,
         allowed_markets: msg.allowed_markets,
+        max_leverage,
+        max_position_size,
+        max_exposure_bps,
+        max_position_margin,
+        cooldown_seconds,
     };
 
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
@@ -67,10 +92,11 @@ pub fn instantiate(
     TOTAL_DISTRIBUTED.save(deps.storage, &Uint128::zero())?;
     REALIZED_PNL_NET.save(deps.storage, &Int128::zero())?;
     LAST_DISTRIBUTION.save(deps.storage, &0u64)?;
+    LAST_POSITION_OPENED.save(deps.storage, &0u64)?;
 
     Ok(Response::new()
         .add_attribute("action", "instantiate")
-        .add_attribute("admin", config.admin)
+        .add_attribute("owner", config.owner)
         .add_attribute("seed_denom", config.seed_denom)
         .add_attribute("treasury_denom", config.treasury_denom))
 }
@@ -89,8 +115,28 @@ pub fn execute(
         ExecuteMsg::Distribute { amount } => distribute(deps, env, info, amount),
         ExecuteMsg::Pause {} => set_paused(deps, info, true),
         ExecuteMsg::Unpause {} => set_paused(deps, info, false),
-        ExecuteMsg::ProposeAdmin { new_admin } => propose_admin(deps, info, new_admin),
-        ExecuteMsg::AcceptAdmin {} => accept_admin(deps, info),
+        ExecuteMsg::ProposeOwner { new_owner } => propose_owner(deps, info, new_owner),
+        ExecuteMsg::AcceptOwner {} => accept_owner(deps, info),
+        ExecuteMsg::UpdateTrader { new_trader } => update_trader(deps, info, new_trader),
+        ExecuteMsg::UpdateConfig {
+            max_leverage,
+            max_position_size,
+            max_exposure_bps,
+            max_total_margin_bps,
+            max_position_margin,
+            cooldown_seconds,
+            allowed_markets,
+        } => update_config(
+            deps,
+            info,
+            max_leverage,
+            max_position_size,
+            max_exposure_bps,
+            max_total_margin_bps,
+            max_position_margin,
+            cooldown_seconds,
+            allowed_markets,
+        ),
         ExecuteMsg::Claim {} => claim(deps, info),
         ExecuteMsg::OpenPosition {
             market_id,
@@ -100,7 +146,7 @@ pub fn execute(
             margin,
             leverage,
         } => open_position(
-            deps, info, market_id, is_buy, quantity, price, margin, leverage,
+            deps, env, info, market_id, is_buy, quantity, price, margin, leverage,
         ),
         ExecuteMsg::ClosePosition {
             market_id,
@@ -125,12 +171,13 @@ fn stake(
         &info.sender,
         |stake| -> Result<_, ContractError> { add_u128(stake.unwrap_or_default(), amount) },
     )?;
-    TOTAL_STAKED.update(deps.storage, |total| add_u128(total, amount))?;
+    let new_total = TOTAL_STAKED.update(deps.storage, |total| add_u128(total, amount))?;
 
     Ok(Response::new()
         .add_attribute("action", "seed_staked")
         .add_attribute("user", info.sender)
-        .add_attribute("amount", amount))
+        .add_attribute("amount", amount)
+        .add_attribute("total_staked", new_total))
 }
 
 fn unstake(
@@ -155,7 +202,7 @@ fn unstake(
     settle(deps.storage, &info.sender)?;
     let remaining = sub_u128(staked, amount)?;
     USER_STAKE.save(deps.storage, &info.sender, &remaining)?;
-    TOTAL_STAKED.update(deps.storage, |total| sub_u128(total, amount))?;
+    let new_total = TOTAL_STAKED.update(deps.storage, |total| sub_u128(total, amount))?;
 
     let send = CosmosMsg::Bank(BankMsg::Send {
         to_address: info.sender.to_string(),
@@ -166,7 +213,9 @@ fn unstake(
         .add_message(send)
         .add_attribute("action", "seed_unstaked")
         .add_attribute("user", info.sender)
-        .add_attribute("amount", amount))
+        .add_attribute("amount", amount)
+        .add_attribute("remaining_stake", remaining)
+        .add_attribute("total_staked", new_total))
 }
 
 fn deposit_treasury(
@@ -174,18 +223,18 @@ fn deposit_treasury(
     info: MessageInfo,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    ensure_admin(&config, &info.sender)?;
-    ensure_not_paused(&config)?;
+    ensure_owner(&config, &info.sender)?;
     let amount = coin_u128(one_coin(&info.funds, &config.treasury_denom)?.amount)?;
 
-    TREASURY_BALANCE.update(deps.storage, |balance| add_u128(balance, amount))?;
+    let new_balance = TREASURY_BALANCE.update(deps.storage, |balance| add_u128(balance, amount))?;
     // TODO: deposit into the exchange module subaccount once margin positions are wired.
     // Funds stay on the contract balance for now.
 
     Ok(Response::new()
         .add_attribute("action", "treasury_deposited")
-        .add_attribute("admin", info.sender)
-        .add_attribute("amount", amount))
+        .add_attribute("owner", info.sender)
+        .add_attribute("amount", amount)
+        .add_attribute("treasury_balance", new_balance))
 }
 
 /// Profit above the high-water mark moves from free treasury into the reward index.
@@ -196,7 +245,7 @@ fn distribute(
     amount: Uint128,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    ensure_operator(&config, &info.sender)?;
+    ensure_owner(&config, &info.sender)?;
     ensure_not_paused(&config)?;
     if amount.is_zero() {
         return Err(ContractError::InvalidAmount);
@@ -242,6 +291,7 @@ fn distribute(
         .add_attribute("action", "yield_distributed")
         .add_attribute("amount", amount)
         .add_attribute("new_index", new_index.to_string())
+        .add_attribute("new_reward_index", new_index.to_string())
         .add_attribute("total_staked", total))
 }
 
@@ -261,53 +311,162 @@ fn set_paused(
     paused: bool,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let mut config = CONFIG.load(deps.storage)?;
-    ensure_admin(&config, &info.sender)?;
+    ensure_owner(&config, &info.sender)?;
     config.paused = paused;
     CONFIG.save(deps.storage, &config)?;
 
     Ok(Response::new()
         .add_attribute("action", if paused { "paused" } else { "unpaused" })
-        .add_attribute("admin", info.sender))
+        .add_attribute("owner", info.sender))
 }
 
-fn propose_admin(
+fn propose_owner(
     deps: DepsMut<InjectiveQueryWrapper>,
     info: MessageInfo,
-    new_admin: String,
+    new_owner: String,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    ensure_admin(&config, &info.sender)?;
-    let pending = deps.api.addr_validate(&new_admin)?;
-    if pending == config.admin {
+    ensure_owner(&config, &info.sender)?;
+    let pending = deps.api.addr_validate(&new_owner)?;
+    if pending == config.owner {
         return Err(ContractError::Unauthorized);
     }
-    PENDING_ADMIN.save(deps.storage, &pending)?;
+    PENDING_OWNER.save(deps.storage, &pending)?;
 
     Ok(Response::new()
-        .add_attribute("action", "admin_proposed")
-        .add_attribute("pending_admin", pending))
+        .add_attribute("action", "owner_proposed")
+        .add_attribute("current_owner", info.sender)
+        .add_attribute("pending_owner", pending))
 }
 
-fn accept_admin(
+fn accept_owner(
     deps: DepsMut<InjectiveQueryWrapper>,
     info: MessageInfo,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
-    let pending = PENDING_ADMIN
+    let pending = PENDING_OWNER
         .may_load(deps.storage)?
         .ok_or(ContractError::Unauthorized)?;
     if info.sender != pending {
         return Err(ContractError::Unauthorized);
     }
 
+    let prev = CONFIG.load(deps.storage)?.owner;
     CONFIG.update(deps.storage, |mut config| -> Result<_, ContractError> {
-        config.admin = pending.clone();
+        config.owner = pending.clone();
         Ok(config)
     })?;
-    PENDING_ADMIN.remove(deps.storage);
+    PENDING_OWNER.remove(deps.storage);
 
     Ok(Response::new()
-        .add_attribute("action", "admin_accepted")
-        .add_attribute("admin", pending))
+        .add_attribute("action", "owner_accepted")
+        .add_attribute("previous_owner", prev)
+        .add_attribute("owner", pending))
+}
+
+fn update_trader(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    info: MessageInfo,
+    new_trader: Option<String>,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    ensure_owner(&config, &info.sender)?;
+
+    let trader_addr = new_trader
+        .as_deref()
+        .map(|trader| deps.api.addr_validate(trader))
+        .transpose()?;
+
+    config.trader = trader_addr.clone();
+    CONFIG.save(deps.storage, &config)?;
+
+    let mut res = Response::new().add_attribute("action", "trader_updated");
+    if let Some(trader) = trader_addr {
+        res = res.add_attribute("trader", trader);
+    } else {
+        res = res.add_attribute("trader", "none");
+    }
+    res = res.add_attribute("owner", info.sender);
+    Ok(res)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_config(
+    deps: DepsMut<InjectiveQueryWrapper>,
+    info: MessageInfo,
+    max_leverage: Option<Decimal>,
+    max_position_size: Option<Uint128>,
+    max_exposure_bps: Option<u16>,
+    max_total_margin_bps: Option<u16>,
+    max_position_margin: Option<Uint128>,
+    cooldown_seconds: Option<u64>,
+    allowed_markets: Option<Vec<String>>,
+) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
+    let mut config = CONFIG.load(deps.storage)?;
+    ensure_owner(&config, &info.sender)?;
+
+    let exposure = max_exposure_bps.or(max_total_margin_bps);
+    if let Some(max_bps) = exposure {
+        if max_bps > 10_000 {
+            return Err(StdError::msg("max_exposure_bps cannot exceed 10000").into());
+        }
+        config.max_exposure_bps = max_bps;
+    }
+
+    if let Some(lev) = max_leverage {
+        if lev < Decimal::one() {
+            return Err(StdError::msg("max_leverage must be at least 1").into());
+        }
+        config.max_leverage = lev;
+    }
+
+    if let Some(pos_margin) = max_position_margin {
+        if pos_margin.is_zero() {
+            return Err(StdError::msg("max_position_margin must be greater than zero").into());
+        }
+        config.max_position_margin = pos_margin;
+    }
+
+    if let Some(pos_size) = max_position_size {
+        if pos_size.is_zero() {
+            return Err(StdError::msg("max_position_size must be greater than zero").into());
+        }
+        config.max_position_size = pos_size;
+    }
+
+    if let Some(cooldown) = cooldown_seconds {
+        config.cooldown_seconds = cooldown;
+    }
+
+    if let Some(ref markets) = allowed_markets {
+        config.allowed_markets = markets.clone();
+    }
+
+    CONFIG.save(deps.storage, &config)?;
+
+    let mut res = Response::new()
+        .add_attribute("action", "config_updated")
+        .add_attribute("owner", info.sender);
+
+    if let Some(lev) = max_leverage {
+        res = res.add_attribute("max_leverage", lev.to_string());
+    }
+    if let Some(pos_size) = max_position_size {
+        res = res.add_attribute("max_position_size", pos_size);
+    }
+    if let Some(max_bps) = exposure {
+        res = res.add_attribute("max_exposure_bps", max_bps.to_string());
+    }
+    if let Some(pos_margin) = max_position_margin {
+        res = res.add_attribute("max_position_margin", pos_margin);
+    }
+    if let Some(cooldown) = cooldown_seconds {
+        res = res.add_attribute("cooldown_seconds", cooldown.to_string());
+    }
+    if let Some(ref markets) = allowed_markets {
+        res = res.add_attribute("allowed_markets", markets.join(","));
+    }
+
+    Ok(res)
 }
 
 /// Pays settled yield. Open while paused so users can always collect what they earned.
@@ -352,17 +511,9 @@ fn record_pnl(
     delta: Int128,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    ensure_admin(&config, &info.sender)?;
+    ensure_owner(&config, &info.sender)?;
     REALIZED_PNL_NET.update(deps.storage, |net| add_i128(net, delta))?;
     Ok(Response::new().add_attribute("action", "pnl_recorded"))
-}
-
-fn ensure_operator(config: &Config, sender: &cosmwasm_std::Addr) -> Result<(), ContractError> {
-    if sender == config.admin || config.keeper.as_ref() == Some(sender) {
-        Ok(())
-    } else {
-        Err(ContractError::Unauthorized)
-    }
 }
 
 fn parse_units(raw: &str, name: &str) -> Result<Uint128, ContractError> {
@@ -400,6 +551,7 @@ fn apply_realized_pnl(
 #[allow(clippy::too_many_arguments)]
 fn open_position(
     deps: DepsMut<InjectiveQueryWrapper>,
+    env: Env,
     info: MessageInfo,
     market_id: String,
     is_buy: bool,
@@ -409,11 +561,22 @@ fn open_position(
     leverage: Option<String>,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    ensure_operator(&config, &info.sender)?;
+    ensure_trader_or_owner(&config, &info.sender)?;
     ensure_not_paused(&config)?;
 
     if !config.allowed_markets.iter().any(|m| m == &market_id) {
         return Err(ContractError::MarketNotAllowed { market_id });
+    }
+
+    let now = env.block.time.seconds();
+    let last_opened = LAST_POSITION_OPENED
+        .may_load(deps.storage)?
+        .unwrap_or_default();
+    if last_opened > 0
+        && config.cooldown_seconds > 0
+        && now < last_opened.saturating_add(config.cooldown_seconds)
+    {
+        return Err(ContractError::CooldownActive);
     }
 
     let qty_u128 = parse_units(&quantity, "quantity")?;
@@ -424,13 +587,8 @@ fn open_position(
         return Err(ContractError::ZeroAmount);
     }
 
-    if qty_u128 > config.max_position_size {
-        return Err(ContractError::RiskLimit {
-            reason: format!(
-                "quantity {} exceeds max_position_size {}",
-                qty_u128, config.max_position_size
-            ),
-        });
+    if margin_u128 > config.max_position_margin || qty_u128 > config.max_position_size {
+        return Err(ContractError::PositionTooLarge);
     }
 
     if let Some(ref lev_str) = leverage {
@@ -438,12 +596,7 @@ fn open_position(
             .parse()
             .map_err(|_| StdError::msg("invalid leverage"))?;
         if lev > config.max_leverage {
-            return Err(ContractError::RiskLimit {
-                reason: format!(
-                    "leverage {} exceeds max_leverage {}",
-                    lev, config.max_leverage
-                ),
-            });
+            return Err(ContractError::LeverageTooHigh);
         }
     }
 
@@ -455,9 +608,7 @@ fn open_position(
             .checked_mul(Decimal256::from_ratio(margin_u128, 1u128))
             .map_err(|e| ContractError::Std(StdError::msg(e)))?;
         if Decimal256::from_ratio(notional_256, 1u128) > max_notional {
-            return Err(ContractError::RiskLimit {
-                reason: "notional exceeds max leverage limit".to_string(),
-            });
+            return Err(ContractError::LeverageTooHigh);
         }
     }
 
@@ -472,21 +623,40 @@ fn open_position(
     let cur_reserved = RESERVED_MARGIN.load(deps.storage)?;
     let total_pool = add_u128(free_treasury, cur_reserved)?;
     let max_allowed_reserved = total_pool.multiply_ratio(
-        Uint128::from(config.max_total_margin_bps),
+        Uint128::from(config.max_exposure_bps),
         Uint128::new(10_000),
     );
     let new_reserved = add_u128(cur_reserved, margin_u128)?;
     if new_reserved > max_allowed_reserved {
-        return Err(ContractError::RiskLimit {
-            reason: format!(
-                "total reserved margin {} exceeds max_total_margin_bps limit {}",
-                new_reserved, max_allowed_reserved
-            ),
-        });
+        return Err(ContractError::ExposureLimitExceeded);
     }
 
     TREASURY_BALANCE.update(deps.storage, |bal| sub_u128(bal, margin_u128))?;
     RESERVED_MARGIN.update(deps.storage, |res| add_u128(res, margin_u128))?;
+    LAST_POSITION_OPENED.save(deps.storage, &now)?;
+
+    let lev_val = if let Some(ref lev) = leverage {
+        lev.clone()
+    } else if !price_u128.is_zero() && !margin_u128.is_zero() {
+        let notional = Uint256::from(qty_u128)
+            .checked_mul(Uint256::from(price_u128))
+            .map_err(|e| ContractError::Std(StdError::msg(e)))?;
+        let lev_dec = Decimal256::from_ratio(notional, margin_u128);
+        lev_dec.to_string()
+    } else {
+        "1".to_string()
+    };
+
+    let pos = Position {
+        market_id: market_id.clone(),
+        is_buy,
+        quantity: qty_u128,
+        price: price_u128,
+        margin: margin_u128,
+        leverage: leverage.clone(),
+        opened_at: now,
+    };
+    POSITIONS.save(deps.storage, &market_id, &pos)?;
 
     // TODO: Build the Injective derivative order as CosmosMsg::Any or InjectiveMsgWrapper
     // using injective-std / injective-cosmwasm types once the exchange subaccount id and
@@ -497,8 +667,14 @@ fn open_position(
     Ok(Response::new()
         .add_messages(messages)
         .add_attribute("action", "open_position")
-        .add_attribute("market_id", market_id)
-        .add_attribute("margin", margin_u128))
+        .add_attribute("trader", &info.sender)
+        .add_attribute("market_id", &market_id)
+        .add_attribute("market", &market_id)
+        .add_attribute("margin", margin_u128)
+        .add_attribute("leverage", lev_val)
+        .add_attribute("is_buy", is_buy.to_string())
+        .add_attribute("quantity", qty_u128)
+        .add_attribute("price", price_u128))
 }
 
 fn close_position(
@@ -508,7 +684,7 @@ fn close_position(
     quantity: Option<String>,
 ) -> Result<Response<InjectiveMsgWrapper>, ContractError> {
     let config = CONFIG.load(deps.storage)?;
-    ensure_operator(&config, &info.sender)?;
+    ensure_trader_or_owner(&config, &info.sender)?;
 
     if !config.allowed_markets.iter().any(|m| m == &market_id) {
         return Err(ContractError::MarketNotAllowed { market_id });
@@ -521,13 +697,18 @@ fn close_position(
         }
     }
 
+    POSITIONS.remove(deps.storage, &market_id);
+
     // TODO: Query position from Injective exchange module, build reduce-only closing order,
     // and route PnL & released margin through apply_realized_pnl(deps.storage, reserved, released).
     let _ = apply_realized_pnl;
 
     Ok(Response::new()
         .add_attribute("action", "close_position")
-        .add_attribute("market_id", market_id))
+        .add_attribute("trader", info.sender)
+        .add_attribute("market_id", &market_id)
+        .add_attribute("market", &market_id)
+        .add_attribute("quantity", quantity.unwrap_or_else(|| "all".to_string())))
 }
 
 #[entry_point]
@@ -541,10 +722,15 @@ pub fn query(deps: Deps<InjectiveQueryWrapper>, _env: Env, msg: QueryMsg) -> Std
         QueryMsg::TreasuryBalance {} => to_json_binary(&AmountResponse {
             amount: TREASURY_BALANCE.load(deps.storage)?,
         }),
+        QueryMsg::TreasuryState {} => to_json_binary(&query_treasury_state(deps)?),
         QueryMsg::PendingYield { user } => to_json_binary(&query_pending(deps, user)?),
-        QueryMsg::Positions {} => to_json_binary(&PositionsResponse { positions: vec![] }),
+        QueryMsg::Positions {} => to_json_binary(&query_positions(deps)?),
+        QueryMsg::OpenPositions { start_after, limit } => {
+            to_json_binary(&query_open_positions(deps, start_after, limit)?)
+        }
         QueryMsg::UserInfo { user } => to_json_binary(&query_user_info(deps, user)?),
         QueryMsg::DistributionInfo {} => to_json_binary(&query_distribution(deps)?),
+        QueryMsg::RiskConfig {} => to_json_binary(&query_risk_config(deps)?),
     }
 }
 
@@ -553,13 +739,42 @@ fn query_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<ConfigResponse> 
     Ok(ConfigResponse {
         seed_token: config.seed_denom,
         treasury_denom: config.treasury_denom,
-        admin: config.admin.into_string(),
+        owner: config.owner.into_string(),
         paused: config.paused,
-        keeper: config.keeper.map(|keeper| keeper.into_string()),
+        trader: config.trader.map(|trader| trader.into_string()),
         max_leverage: config.max_leverage.to_string(),
         max_position_size: config.max_position_size,
-        max_total_margin_bps: config.max_total_margin_bps,
+        max_total_margin_bps: config.max_exposure_bps,
+        max_exposure_bps: config.max_exposure_bps,
+        max_position_margin: config.max_position_margin,
+        cooldown_seconds: config.cooldown_seconds,
         allowed_markets: config.allowed_markets,
+    })
+}
+
+fn query_risk_config(deps: Deps<InjectiveQueryWrapper>) -> StdResult<RiskConfigResponse> {
+    let config = CONFIG.load(deps.storage)?;
+    let free_treasury = TREASURY_BALANCE.load(deps.storage)?;
+    let reserved = RESERVED_MARGIN.load(deps.storage)?;
+    let total_pool = free_treasury + reserved;
+    let current_exposure_bps = if total_pool.is_zero() {
+        0u16
+    } else {
+        reserved
+            .multiply_ratio(10_000u128, total_pool)
+            .u128() as u16
+    };
+
+    Ok(RiskConfigResponse {
+        allowed_markets: config.allowed_markets,
+        max_leverage: config.max_leverage.to_string(),
+        max_exposure_bps: config.max_exposure_bps,
+        max_position_margin: config.max_position_margin,
+        cooldown_seconds: config.cooldown_seconds,
+        current_exposure_bps,
+        current_used_exposure: reserved,
+        reserved_margin: reserved,
+        total_treasury: total_pool,
     })
 }
 
@@ -610,4 +825,45 @@ fn query_distribution(deps: Deps<InjectiveQueryWrapper>) -> StdResult<Distributi
         last_distribution: LAST_DISTRIBUTION.load(deps.storage)?,
         global_index: GLOBAL_INDEX.load(deps.storage)?.to_string(),
     })
+}
+
+fn query_treasury_state(deps: Deps<InjectiveQueryWrapper>) -> StdResult<TreasuryStateResponse> {
+    let balance = TREASURY_BALANCE.load(deps.storage)?;
+    let reserved_margin = RESERVED_MARGIN.load(deps.storage)?;
+    let net = REALIZED_PNL_NET.load(deps.storage)?;
+    let distributed = TOTAL_DISTRIBUTED.load(deps.storage)?;
+    let undistributed = distributable_profit(net, distributed)
+        .map_err(|e| StdError::msg(e.to_string()))?;
+
+    Ok(TreasuryStateResponse {
+        balance,
+        reserved_margin,
+        undistributed,
+    })
+}
+
+fn query_positions(deps: Deps<InjectiveQueryWrapper>) -> StdResult<PositionsResponse> {
+    let positions = POSITIONS
+        .range(deps.storage, None, None, Order::Ascending)
+        .take(100)
+        .map(|res| res.map(|(market_id, _)| market_id))
+        .collect::<StdResult<Vec<String>>>()?;
+
+    Ok(PositionsResponse { positions })
+}
+
+fn query_open_positions(
+    deps: Deps<InjectiveQueryWrapper>,
+    start_after: Option<String>,
+    limit: Option<u32>,
+) -> StdResult<OpenPositionsResponse> {
+    let limit = limit.unwrap_or(30).min(100) as usize;
+    let start = start_after.as_deref().map(Bound::exclusive);
+    let positions = POSITIONS
+        .range(deps.storage, start, None, Order::Ascending)
+        .take(limit)
+        .map(|res| res.map(|(_, pos)| pos))
+        .collect::<StdResult<Vec<Position>>>()?;
+
+    Ok(OpenPositionsResponse { positions })
 }

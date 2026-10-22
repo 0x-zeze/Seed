@@ -36,6 +36,18 @@ pub enum ContractError {
     #[error("market {market_id} is not allowed")]
     MarketNotAllowed { market_id: String },
 
+    #[error("leverage too high")]
+    LeverageTooHigh,
+
+    #[error("exposure limit exceeded")]
+    ExposureLimitExceeded,
+
+    #[error("position too large")]
+    PositionTooLarge,
+
+    #[error("cooldown active")]
+    CooldownActive,
+
     #[error("position exceeds a risk limit: {reason}")]
     RiskLimit { reason: String },
 
