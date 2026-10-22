@@ -7,7 +7,9 @@
     "store": "tsx src/store.ts",
     "instantiate": "tsx src/instantiate.ts",
     "smoke": "tsx src/smoke.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsx test/verify-control-flow.test.ts",
+    "test": "tsx test/verify-control-flow.test.ts",
+    "guard": "tsx test/verify-control-flow.test.ts"
   },
   "dependencies": {
     "@injectivelabs/networks": "^1.20.61",

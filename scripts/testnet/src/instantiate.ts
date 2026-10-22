@@ -74,6 +74,9 @@ async function main(): Promise<void> {
     if (errMsg.includes("already exists") || errMsg.includes("duplicate")) {
       console.log(`[INFO] Denom ${fullSeedDenom} already exists on-chain, continuing...`);
     } else {
+      handleRawChainError("TokenFactory CreateDenom", createErr);
+    }
+  }
 
   // 4b. Mint test SEED tokens to deployer wallet
   const mintAmount = "1000000000000000000000"; // 1,000 units with 18 decimals
@@ -161,6 +164,3 @@ async function main(): Promise<void> {
 
 main().catch((err) => handleRawChainError("Unhandled Instantiate Main Error", err));
 
-      handleRawChainError("TokenFactory CreateDenom", createErr);
-    }
-  }
