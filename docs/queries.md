@@ -14,6 +14,7 @@ pub enum QueryMsg {
     TreasuryBalance {},
     PendingYield { user: String },
     Positions {},
+    RiskConfig {},
     // ...
 }
 ```
@@ -25,8 +26,31 @@ pub enum QueryMsg {
 {
   "seed_token": "factory/...",
   "treasury_denom": "usdt",
-  "admin": "inj1...",
-  "paused": false
+  "owner": "inj1...",
+  "paused": false,
+  "trader": "inj1...",
+  "max_leverage": "3",
+  "max_position_size": "10000000",
+  "max_exposure_bps": 5000,
+  "max_total_margin_bps": 5000,
+  "max_position_margin": "5000000",
+  "cooldown_seconds": 60,
+  "allowed_markets": ["0x..."]
+}
+```
+
+### RiskConfig
+```json
+{
+  "allowed_markets": ["0x..."],
+  "max_leverage": "3",
+  "max_exposure_bps": 5000,
+  "max_position_margin": "5000000",
+  "cooldown_seconds": 60,
+  "current_exposure_bps": 2500,
+  "current_used_exposure": "2500000",
+  "reserved_margin": "2500000",
+  "total_treasury": "10000000"
 }
 ```
 

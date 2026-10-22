@@ -42,10 +42,13 @@ pub enum ExecuteMsg {
 - `TREASURY_BALANCE` (margin reserved / released)
 
 ## Errors
-- Unauthorized
-- Insufficient margin
-- Invalid market
-- Position not found (on close)
+- `Unauthorized`
+- `MarketNotAllowed { market_id }`
+- `LeverageTooHigh`
+- `ExposureLimitExceeded`
+- `PositionTooLarge`
+- `CooldownActive`
+- `InsufficientTreasury`
 
 ## Example Call
 ```bash
