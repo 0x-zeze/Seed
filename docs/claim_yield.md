@@ -128,12 +128,13 @@ QueryMsg::DistributionInfo {}             // Returns total_distributed, rewards_
 ```bash
 injectived tx wasm execute $CONTRACT '{"claim":{}}' \
   --from $USER \
-  --chain-id injective-1
+  --chain-id injective-888
 ```
 
 ---
 
-## Invariants & Solvency Guarantees
+## Invariants & Solvency Properties
 1. **Mathematical Solvency**: CosmWasm integer division truncates fractions (`floor`), ensuring `sum(user_claims) <= total_distributed`. Fractional rounding dust remains safely accounted for inside `REWARDS_RESERVED` and contract bank balances.
 2. **Liability Segregation**: Once profit is distributed into `REWARDS_RESERVED`, subsequent trading losses on Injective perpetuals cannot touch or dilute staker rewards.
 3. **Double-Claim Prevention**: Immediate zeroing of `USER_PENDING` upon claim ensures idempotent execution; repeated calls reject with `NothingToClaim`.
+4. **Testnet Notice**: Because exchange integration has not been finalized, `Distribute` and `Claim` have not yet been exercised end to end with real trading profits on testnet.

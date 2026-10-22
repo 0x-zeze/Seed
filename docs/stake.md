@@ -5,8 +5,7 @@ Users stake `$SEED` tokens (launched on Sprout.fun) into the CosmWasm vault cont
 
 ## Message
 ```rust
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[cw_serde]
 pub enum ExecuteMsg {
     Stake {},
     // ...
@@ -14,34 +13,38 @@ pub enum ExecuteMsg {
 ```
 
 ## Parameters
-- **Sender**: User address
-- **Funds**: Must include `$SEED` tokens (native bank denom from Sprout)
-- **Amount**: Taken from `info.funds`
+- **Sender**: User address (`info.sender`)
+- **Funds**: Must include exactly one coin matching the configured `seed_denom`
+- **Amount**: Extracted directly from `info.funds`
 
 ## Logic
-1. Validate that the sent denom is the expected `$SEED` token.
-2. Record the user’s new stake balance (additive).
-3. Update total staked amount.
-4. Optionally mint a share token (or just track internal shares).
-5. Emit event: `seed_staked` with user + amount.
+1. Verify contract is not paused (`ensure_not_paused`).
+2. Validate that the sent coin denom matches `config.seed_denom` and amount is strictly greater than zero.
+3. Settle user's pending yield up to the current `GLOBAL_INDEX` via `settle(deps.storage, &info.sender)` (initializes `USER_INDEX` to `GLOBAL_INDEX` for first-time stakers so past distributions cannot be claimed).
+4. Add the deposited amount 1:1 to `USER_STAKE[info.sender]`.
+5. Add the deposited amount 1:1 to `TOTAL_STAKED`.
+6. Emit response with attributes: `action = "seed_staked"`, `user = info.sender`, `amount = amount`.
 
 ## State Changes
-- `USER_STAKE` map: `Addr → Uint128`
-- `TOTAL_STAKED`: `Uint128`
+- `USER_INDEX`: Updated to current `GLOBAL_INDEX`
+- `USER_PENDING`: Accrues any unsettled yield earned prior to this deposit
+- `USER_STAKE`: `Addr → Uint128` (incremented by deposited amount)
+- `TOTAL_STAKED`: `Uint128` (incremented by deposited amount)
 
 ## Errors
-- Wrong denom
-- Zero amount
-- Contract paused
+- `ContractError::Paused`: Contract is paused
+- `ContractError::InvalidFunds`: Sent coin denom does not match `seed_denom`, or multiple coins sent
+- `ContractError::ZeroAmount`: Sent amount is zero
 
 ## Example Call (CLI)
 ```bash
 injectived tx wasm execute $CONTRACT '{"stake":{}}' \
-  --amount 100000000seed \
+  --amount 1000000000000000000factory/inj1.../seed \
   --from $WALLET \
-  --chain-id injective-1
+  --chain-id injective-888
 ```
 
 ## Notes
-- Shares can be 1:1 with staked amount for simplicity, or use a share calculation if yield is auto-compounded.
-- Unstaking should respect any lock period if you add one later.
+- Stake balances are tracked 1:1 internally via `USER_STAKE`; no external CW20 share token is minted.
+- Staking is strictly blocked while the contract is paused.
+- Calling `Stake` lazily flushes accrued yield into `USER_PENDING` before the balance increases, preventing dilution of past rewards.

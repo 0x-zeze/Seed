@@ -1,4 +1,6 @@
-# Seed Vault — Audit & Verification Output
+> **Notice:** These are internal checks and developer verification notes, NOT an independent third-party audit.
+
+# Seed Vault — Internal Verification Output
 
 Combined execution output for role boundary verification, risk parameter enforcement, circuit breaker mechanics, and test suite execution.
 
@@ -154,6 +156,6 @@ test testing::unstake_more_than_staked_fails ... ok
 test testing::update_config_by_owner_and_unauthorized_checks ... ok
 test testing::update_trader_by_owner_and_unauthorized_checks ... ok
 
-test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
 ```
 
