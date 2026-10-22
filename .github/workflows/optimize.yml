@@ -1,0 +1,27 @@
+name: optimize-wasm
+
+on:
+  workflow_dispatch:
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run cosmwasm optimizer
+        run: |
+          docker run --rm -v "$(pwd)/contracts/seed-vault":/code \
+            --mount type=volume,source="seed_vault_cache",target=/target \
+            --mount type=volume,source="registry_cache",target=/usr/local/cargo/registry \
+            cosmwasm/optimizer:0.17.0
+
+      - name: Print checksums
+        run: cat contracts/seed-vault/artifacts/checksums.txt
+
+      - name: Upload wasm artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: seed-vault-wasm
+          path: contracts/seed-vault/artifacts/*

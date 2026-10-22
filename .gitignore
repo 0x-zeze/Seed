@@ -1,4 +1,9 @@
+target/
 **/target/
+artifacts/
+**/artifacts/
+.env
+**/.env
 **/*.rs.bk
 *.swp
 *.bak
