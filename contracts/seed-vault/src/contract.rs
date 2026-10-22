@@ -686,10 +686,6 @@ fn close_position(
     let config = CONFIG.load(deps.storage)?;
     ensure_trader_or_owner(&config, &info.sender)?;
 
-    if !config.allowed_markets.iter().any(|m| m == &market_id) {
-        return Err(ContractError::MarketNotAllowed { market_id });
-    }
-
     if let Some(ref q) = quantity {
         let qty = parse_units(q, "quantity")?;
         if qty.is_zero() {
@@ -697,11 +693,12 @@ fn close_position(
         }
     }
 
+    if let Some(pos) = POSITIONS.may_load(deps.storage, &market_id)? {
+        apply_realized_pnl(deps.storage, pos.margin, pos.margin)?;
+    }
     POSITIONS.remove(deps.storage, &market_id);
 
-    // TODO: Query position from Injective exchange module, build reduce-only closing order,
-    // and route PnL & released margin through apply_realized_pnl(deps.storage, reserved, released).
-    let _ = apply_realized_pnl;
+    // TODO: Query position from Injective exchange module and build reduce-only closing order.
 
     Ok(Response::new()
         .add_attribute("action", "close_position")

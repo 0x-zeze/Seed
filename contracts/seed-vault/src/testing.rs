@@ -3755,3 +3755,154 @@ fn test_multiple_stakers_multiple_rounds_exact_payouts_and_dust_accounting() {
     ));
 }
 
+#[test]
+fn test_close_position_on_delisted_market_releases_reserved_margin() {
+    let mut deps = mock_dependencies();
+    let owner = addr20("owner");
+    let trader = addr20("trader");
+    let delisted_market = MARKET_1;
+    let other_market = "0xmarket_other";
+
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&owner, &[]),
+        InstantiateMsg {
+            owner: owner.to_string(),
+            seed_denom: SEED.to_string(),
+            treasury_denom: USDT.to_string(),
+            trader: Some(trader.to_string()),
+            allowed_markets: vec![delisted_market.to_string()],
+            max_leverage: Some(Decimal::from_ratio(3u128, 1u128)),
+            max_position_size: Some(Uint128::new(10_000_000)),
+            max_exposure_bps: Some(5_000),
+            max_total_margin_bps: None,
+            max_position_margin: Some(Uint128::new(5_000_000)),
+            cooldown_seconds: Some(0),
+        },
+    )
+    .unwrap();
+
+    // 1. Deposit treasury funds
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&owner, &coins(10_000_000, USDT)),
+        ExecuteMsg::DepositTreasury {},
+    )
+    .unwrap();
+
+    assert_eq!(
+        TREASURY_BALANCE.load(&deps.storage).unwrap(),
+        Uint128::new(10_000_000)
+    );
+    assert_eq!(
+        RESERVED_MARGIN.load(&deps.storage).unwrap(),
+        Uint128::zero()
+    );
+
+    // 2. Trader opens position on allowed market
+    let open_margin = Uint128::new(2_000_000);
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&trader, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: delisted_market.to_string(),
+            is_buy: true,
+            quantity: "500".to_string(),
+            price: "20".to_string(),
+            margin: open_margin.to_string(),
+            leverage: Some("2".to_string()),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        RESERVED_MARGIN.load(&deps.storage).unwrap(),
+        open_margin
+    );
+    assert_eq!(
+        TREASURY_BALANCE.load(&deps.storage).unwrap(),
+        Uint128::new(8_000_000)
+    );
+    assert!(POSITIONS.has(&deps.storage, delisted_market));
+
+    // 3. Owner removes the market via UpdateConfig
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&owner, &[]),
+        ExecuteMsg::UpdateConfig {
+            max_leverage: None,
+            max_position_size: None,
+            max_exposure_bps: None,
+            max_total_margin_bps: None,
+            max_position_margin: None,
+            cooldown_seconds: None,
+            allowed_markets: Some(vec![other_market.to_string()]),
+        },
+    )
+    .unwrap();
+
+    let config: ConfigResponse = from_json(
+        query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap(),
+    )
+    .unwrap();
+    assert!(!config.allowed_markets.iter().any(|m| m == delisted_market));
+    assert_eq!(config.allowed_markets, vec![other_market.to_string()]);
+
+    // Trader cannot open a new position on the delisted market
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&trader, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: delisted_market.to_string(),
+            is_buy: true,
+            quantity: "100".to_string(),
+            price: "20".to_string(),
+            margin: "100000".to_string(),
+            leverage: None,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::MarketNotAllowed { .. }));
+
+    // 4. Trader closes existing position on delisted market successfully
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&trader, &[]),
+        ExecuteMsg::ClosePosition {
+            market_id: delisted_market.to_string(),
+            quantity: None,
+        },
+    )
+    .unwrap();
+
+    let attr = |key: &str| res.attributes.iter().find(|a| a.key == key).map(|a| a.value.as_str());
+    assert_eq!(attr("action"), Some("close_position"));
+    assert_eq!(attr("trader"), Some(trader.as_str()));
+    assert_eq!(attr("market_id"), Some(delisted_market));
+
+    // 5. Reserved margin is released and treasury balance restored
+    assert_eq!(
+        RESERVED_MARGIN.load(&deps.storage).unwrap(),
+        Uint128::zero()
+    );
+    assert_eq!(
+        TREASURY_BALANCE.load(&deps.storage).unwrap(),
+        Uint128::new(10_000_000)
+    );
+    assert!(!POSITIONS.has(&deps.storage, delisted_market));
+
+    let state: TreasuryStateResponse = from_json(
+        query(deps.as_ref(), mock_env(), QueryMsg::TreasuryState {}).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state.reserved_margin, Uint128::zero());
+    assert_eq!(state.balance, Uint128::new(10_000_000));
+}
+
+
