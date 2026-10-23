@@ -1,6 +1,7 @@
 use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env};
 use cosmwasm_std::{
-    coin, coins, from_json, BankMsg, Coin, CosmosMsg, Decimal, Decimal256, Int128, Uint128,
+    coin, coins, from_json, BankMsg, Coin, CosmosMsg, Decimal, Decimal256, Int128, Reply,
+    SubMsgResponse, SubMsgResult, Uint128,
 };
 
 fn inj_deps() -> cosmwasm_std::OwnedDeps<
@@ -15,7 +16,9 @@ fn inj_deps() -> cosmwasm_std::OwnedDeps<
 }
 
 use crate::addresses::addr20;
-use crate::contract::{execute, instantiate, query};
+use crate::contract::{
+    execute, instantiate, query, reply, REPLY_CLOSE_POSITION, REPLY_OPEN_POSITION,
+};
 use crate::error::ContractError;
 use crate::helpers::pending_yield;
 use crate::msg::{
@@ -796,7 +799,22 @@ fn open_position_enforces_limits_and_reserves_margin() {
     )
     .unwrap();
 
-    assert_eq!(res.messages.len(), 0);
+    assert_eq!(res.messages.len(), 2);
+    #[allow(deprecated)]
+    match &res.messages[0].msg {
+        CosmosMsg::Stargate { type_url, .. } => {
+            assert_eq!(type_url, "/injective.exchange.v1beta1.MsgDeposit");
+        }
+        _ => panic!("expected MsgDeposit stargate message"),
+    }
+    assert_eq!(res.messages[1].id, crate::contract::REPLY_OPEN_POSITION);
+    #[allow(deprecated)]
+    match &res.messages[1].msg {
+        CosmosMsg::Stargate { type_url, .. } => {
+            assert_eq!(type_url, "/injective.exchange.v1beta1.MsgCreateDerivativeMarketOrder");
+        }
+        _ => panic!("expected MsgCreateDerivativeMarketOrder stargate message"),
+    }
     assert_eq!(res.attributes[0].value, "open_position");
     assert_eq!(
         TREASURY_BALANCE.load(&deps.storage).unwrap(),
@@ -4205,3 +4223,136 @@ fn partial_close_is_rejected_and_leaves_margin_reserved() {
 }
 
 
+
+
+#[test]
+fn test_close_position_emits_injective_derivative_and_withdraw_messages() {
+    let (mut deps, admin) = setup();
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &coins(10_000_000, USDT)),
+        ExecuteMsg::DepositTreasury {},
+    )
+    .unwrap();
+
+    // 1. Open Long position
+    let open_res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: MARKET_1.to_string(),
+            is_buy: true,
+            quantity: "1000".to_string(),
+            price: "1000".to_string(),
+            margin: "1000000".to_string(),
+            leverage: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(open_res.messages.len(), 2);
+
+    // 2. Close Long position -> should emit Sell order + Withdraw
+    let close_res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::ClosePosition {
+            market_id: MARKET_1.to_string(),
+            quantity: Some("1000".to_string()),
+        },
+    )
+    .unwrap();
+    assert_eq!(close_res.messages.len(), 2);
+    assert_eq!(close_res.messages[0].id, REPLY_CLOSE_POSITION);
+
+    #[allow(deprecated)]
+    match &close_res.messages[0].msg {
+        CosmosMsg::Stargate { type_url, .. } => {
+            assert_eq!(
+                type_url,
+                "/injective.exchange.v1beta1.MsgCreateDerivativeMarketOrder"
+            );
+        }
+        _ => panic!("expected MsgCreateDerivativeMarketOrder stargate message"),
+    }
+
+    #[allow(deprecated)]
+    match &close_res.messages[1].msg {
+        CosmosMsg::Stargate { type_url, .. } => {
+            assert_eq!(type_url, "/injective.exchange.v1beta1.MsgWithdraw");
+        }
+        _ => panic!("expected MsgWithdraw stargate message"),
+    }
+}
+
+#[test]
+#[allow(deprecated)]
+fn test_reply_handlers_success_and_error() {
+    let mut deps = inj_deps();
+    let env = mock_env();
+
+    // 1. REPLY_OPEN_POSITION success
+    let reply_msg = Reply {
+        id: REPLY_OPEN_POSITION,
+        payload: cosmwasm_std::Binary::default(),
+        gas_used: 10_000,
+        result: SubMsgResult::Ok(SubMsgResponse {
+            events: vec![],
+            data: None,
+            msg_responses: vec![],
+        }),
+    };
+    let res = reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
+    assert_eq!(res.attributes[0].value, "reply_open_position");
+
+    // 2. REPLY_CLOSE_POSITION success
+    let reply_msg = Reply {
+        id: REPLY_CLOSE_POSITION,
+        payload: cosmwasm_std::Binary::default(),
+        gas_used: 10_000,
+        result: SubMsgResult::Ok(SubMsgResponse {
+            events: vec![],
+            data: None,
+            msg_responses: vec![],
+        }),
+    };
+    let res = reply(deps.as_mut(), env.clone(), reply_msg).unwrap();
+    assert_eq!(res.attributes[0].value, "reply_close_position");
+
+    // 3. REPLY_OPEN_POSITION error
+    let reply_err = Reply {
+        id: REPLY_OPEN_POSITION,
+        payload: cosmwasm_std::Binary::default(),
+        gas_used: 10_000,
+        result: SubMsgResult::Err("insufficient margin in subaccount".to_string()),
+    };
+    let err = reply(deps.as_mut(), env.clone(), reply_err).unwrap_err();
+    assert!(err.to_string().contains("open position execution failed"));
+
+    // 4. REPLY_CLOSE_POSITION error
+    let reply_err = Reply {
+        id: REPLY_CLOSE_POSITION,
+        payload: cosmwasm_std::Binary::default(),
+        gas_used: 10_000,
+        result: SubMsgResult::Err("market order slippage exceeded".to_string()),
+    };
+    let err = reply(deps.as_mut(), env.clone(), reply_err).unwrap_err();
+    assert!(err.to_string().contains("close position execution failed"));
+
+    // 5. Unknown reply id
+    let reply_unknown = Reply {
+        id: 999,
+        payload: cosmwasm_std::Binary::default(),
+        gas_used: 10_000,
+        result: SubMsgResult::Ok(SubMsgResponse {
+            events: vec![],
+            data: None,
+            msg_responses: vec![],
+        }),
+    };
+    let err = reply(deps.as_mut(), env, reply_unknown).unwrap_err();
+    assert!(err.to_string().contains("unknown reply id: 999"));
+}

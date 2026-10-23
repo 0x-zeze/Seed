@@ -1,10 +1,16 @@
 use cosmwasm_std::{
     entry_point, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Decimal, Decimal256, Deps,
-    DepsMut, Empty, Env, Int128, MessageInfo, Order, Response, StdError, StdResult, Uint128,
-    Uint256,
+    DepsMut, Empty, Env, Int128, MessageInfo, Order, Reply, Response, StdError, StdResult,
+    SubMsg, SubMsgResult, Uint128, Uint256,
 };
 use cw_storage_plus::Bound;
 use cw2::set_contract_version;
+use injective_std::types::injective::exchange::v1beta1::{
+    DerivativeOrder, MsgCreateDerivativeMarketOrder, MsgDeposit, MsgWithdraw, OrderInfo, OrderType,
+};
+
+pub const REPLY_OPEN_POSITION: u64 = 1;
+pub const REPLY_CLOSE_POSITION: u64 = 2;
 
 use crate::error::ContractError;
 use crate::helpers::{
@@ -153,7 +159,7 @@ pub fn execute(
         ExecuteMsg::ClosePosition {
             market_id,
             quantity,
-        } => close_position(deps, info, market_id, quantity),
+        } => close_position(deps, env, info, market_id, quantity),
         #[cfg(test)]
         ExecuteMsg::RecordPnl { delta } => record_pnl(deps, info, delta),
     }
@@ -638,14 +644,45 @@ fn open_position(
     };
     POSITIONS.save(deps.storage, &market_id, &pos)?;
 
-    // TODO: Build the Injective derivative order as CosmosMsg::Any
-    // using injective-std types once the exchange subaccount id and
-    // protobuf wire encoding are finalized. Returning empty message list for now.
-    let _ = (is_buy, price_u128);
-    let messages: Vec<CosmosMsg<Empty>> = vec![];
+    let subaccount_id = crate::addresses::default_subaccount_id(&env.contract.address)?;
+
+    let deposit_msg: CosmosMsg<Empty> = MsgDeposit {
+        sender: env.contract.address.to_string(),
+        subaccount_id: subaccount_id.clone(),
+        amount: Some(injective_std::types::cosmos::base::v1beta1::Coin {
+            denom: config.treasury_denom.clone(),
+            amount: margin_u128.to_string(),
+        }),
+    }
+    .into();
+
+    let order_msg: CosmosMsg<Empty> = MsgCreateDerivativeMarketOrder {
+        sender: env.contract.address.to_string(),
+        order: Some(DerivativeOrder {
+            market_id: market_id.clone(),
+            order_info: Some(OrderInfo {
+                subaccount_id,
+                fee_recipient: env.contract.address.to_string(),
+                price: price_u128.to_string(),
+                quantity: qty_u128.to_string(),
+                cid: "".to_string(),
+            }),
+            order_type: if is_buy {
+                OrderType::Buy as i32
+            } else {
+                OrderType::Sell as i32
+            },
+            margin: margin_u128.to_string(),
+            trigger_price: "".to_string(),
+        }),
+    }
+    .into();
+
+    let order_submsg = SubMsg::reply_on_success(order_msg, REPLY_OPEN_POSITION);
 
     Ok(Response::new()
-        .add_messages(messages)
+        .add_message(deposit_msg)
+        .add_submessage(order_submsg)
         .add_attribute("action", "open_position")
         .add_attribute("trader", &info.sender)
         .add_attribute("market_id", &market_id)
@@ -659,6 +696,7 @@ fn open_position(
 
 fn close_position(
     deps: DepsMut<Empty>,
+    env: Env,
     info: MessageInfo,
     market_id: String,
     quantity: Option<String>,
@@ -682,16 +720,49 @@ fn close_position(
         }
     }
 
-    // TODO: Replace this interim full close with chain-derived PnL. Query the
-    // Injective exchange module, settle the subaccount, and book the realized
-    // gap between reserved margin and the amount the exchange actually returns.
-    // Until then realized PnL stays 0: the caller cannot supply a PnL value,
-    // and the whole reserved margin is released back to free treasury.
     RESERVED_MARGIN.update(deps.storage, |margin| sub_u128(margin, pos.margin))?;
     TREASURY_BALANCE.update(deps.storage, |free| add_u128(free, pos.margin))?;
     POSITIONS.remove(deps.storage, &market_id);
 
+    let subaccount_id = crate::addresses::default_subaccount_id(&env.contract.address)?;
+
+    let close_order: CosmosMsg<Empty> = MsgCreateDerivativeMarketOrder {
+        sender: env.contract.address.to_string(),
+        order: Some(DerivativeOrder {
+            market_id: market_id.clone(),
+            order_info: Some(OrderInfo {
+                subaccount_id: subaccount_id.clone(),
+                fee_recipient: env.contract.address.to_string(),
+                price: pos.price.to_string(),
+                quantity: pos.quantity.to_string(),
+                cid: "".to_string(),
+            }),
+            order_type: if pos.is_buy {
+                OrderType::Sell as i32
+            } else {
+                OrderType::Buy as i32
+            },
+            margin: "0".to_string(),
+            trigger_price: "".to_string(),
+        }),
+    }
+    .into();
+
+    let withdraw_msg: CosmosMsg<Empty> = MsgWithdraw {
+        sender: env.contract.address.to_string(),
+        subaccount_id,
+        amount: Some(injective_std::types::cosmos::base::v1beta1::Coin {
+            denom: config.treasury_denom,
+            amount: pos.margin.to_string(),
+        }),
+    }
+    .into();
+
+    let close_submsg = SubMsg::reply_on_success(close_order, REPLY_CLOSE_POSITION);
+
     Ok(Response::new()
+        .add_submessage(close_submsg)
+        .add_message(withdraw_msg)
         .add_attribute("action", "close_position")
         .add_attribute("trader", info.sender)
         .add_attribute("market_id", &market_id)
@@ -702,6 +773,36 @@ fn close_position(
         )
         .add_attribute("margin_released", pos.margin)
         .add_attribute("realized_pnl", "0"))
+}
+
+#[entry_point]
+pub fn reply(
+    _deps: DepsMut<Empty>,
+    _env: Env,
+    msg: Reply,
+) -> Result<Response<Empty>, ContractError> {
+    match msg.id {
+        REPLY_OPEN_POSITION => match msg.result {
+            SubMsgResult::Ok(_) => {
+                Ok(Response::new().add_attribute("action", "reply_open_position"))
+            }
+            SubMsgResult::Err(err) => Err(ContractError::Std(StdError::msg(format!(
+                "open position execution failed: {err}"
+            )))),
+        },
+        REPLY_CLOSE_POSITION => match msg.result {
+            SubMsgResult::Ok(_) => {
+                Ok(Response::new().add_attribute("action", "reply_close_position"))
+            }
+            SubMsgResult::Err(err) => Err(ContractError::Std(StdError::msg(format!(
+                "close position execution failed: {err}"
+            )))),
+        },
+        _ => Err(ContractError::Std(StdError::msg(format!(
+            "unknown reply id: {}",
+            msg.id
+        )))),
+    }
 }
 
 #[entry_point]
