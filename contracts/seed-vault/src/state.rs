@@ -5,6 +5,18 @@ use cw_storage_plus::{Item, Map};
 pub const CONTRACT_NAME: &str = "crates.io:seed-vault";
 pub const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Quote decimals used to turn chain price × quantity into quote base units.
+///
+/// Assumption: every allowed market quotes a 6-decimal stablecoin (USDT/USDC),
+/// matching the preferred ETH/INJ/GOLD perps. Chain price is human price × 10^6.
+/// Quantity is already in contract units (a fractional string such as "0.01" is
+/// 0.01 contracts, not 0.01 × 10^6). Margin is quote base units (micro-USDT).
+///
+/// Human notional in quote base units is therefore
+/// `quantity * price / 10^QUOTE_DECIMALS`, not the raw product. This constant is
+/// not configurable per market.
+pub const QUOTE_DECIMALS: u32 = 6;
+
 #[cw_serde]
 pub struct Config {
     pub owner: Addr,
@@ -69,7 +81,8 @@ pub const LAST_POSITION_OPENED: Item<u64> = Item::new("last_position_opened");
 pub struct Position {
     pub market_id: String,
     pub is_buy: bool,
-    pub quantity: Uint128,
+    /// Contract quantity. May be fractional (`"0.01"` is 0.01 contracts).
+    pub quantity: Decimal256,
     pub price: Uint128,
     pub margin: Uint128,
     pub leverage: Option<String>,

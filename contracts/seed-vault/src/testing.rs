@@ -3,6 +3,9 @@ use cosmwasm_std::{
     coin, coins, from_json, BankMsg, Coin, CosmosMsg, Decimal, Decimal256, Int128, Reply,
     SubMsgResponse, SubMsgResult, Uint128,
 };
+use injective_std::types::injective::exchange::v1beta1::{
+    MsgCreateDerivativeMarketOrder, MsgDeposit, MsgWithdraw, OrderType,
+};
 
 fn inj_deps() -> cosmwasm_std::OwnedDeps<
     cosmwasm_std::testing::MockStorage,
@@ -732,7 +735,9 @@ fn open_position_enforces_limits_and_reserves_margin() {
     .unwrap_err();
     assert!(matches!(err, ContractError::LeverageTooHigh));
 
-    // 5. Notional exceeding margin * max_leverage
+    // 5. Notional exceeding margin * max_leverage.
+    // Chain price is human price × 10^6. 4000 contracts at $1000 is notional
+    // 4_000_000_000_000; 3× the $1 margin (1_000_000) is 3_000_000.
     let err = execute(
         deps.as_mut(),
         mock_env(),
@@ -741,7 +746,7 @@ fn open_position_enforces_limits_and_reserves_margin() {
             market_id: MARKET_1.to_string(),
             is_buy: true,
             quantity: "4000".to_string(),
-            price: "1000".to_string(),
+            price: "1000000000".to_string(),
             margin: "1000000".to_string(),
             leverage: None,
         },
@@ -800,21 +805,37 @@ fn open_position_enforces_limits_and_reserves_margin() {
     .unwrap();
 
     assert_eq!(res.messages.len(), 2);
-    #[allow(deprecated)]
-    match &res.messages[0].msg {
-        CosmosMsg::Stargate { type_url, .. } => {
-            assert_eq!(type_url, "/injective.exchange.v1beta1.MsgDeposit");
+    let deposit = match &res.messages[0].msg {
+        CosmosMsg::Any(any) => {
+            assert_eq!(any.type_url, MsgDeposit::TYPE_URL);
+            MsgDeposit::try_from(any.value.clone()).unwrap()
         }
-        _ => panic!("expected MsgDeposit stargate message"),
-    }
+        _ => panic!("expected MsgDeposit CosmosMsg::Any"),
+    };
+    let subaccount = crate::addresses::default_subaccount_id(&mock_env().contract.address).unwrap();
+    assert_eq!(deposit.sender, mock_env().contract.address.as_str());
+    assert_eq!(deposit.subaccount_id, subaccount);
+    assert_eq!(
+        deposit.amount.unwrap().amount,
+        "2000000"
+    );
+
     assert_eq!(res.messages[1].id, crate::contract::REPLY_OPEN_POSITION);
-    #[allow(deprecated)]
-    match &res.messages[1].msg {
-        CosmosMsg::Stargate { type_url, .. } => {
-            assert_eq!(type_url, "/injective.exchange.v1beta1.MsgCreateDerivativeMarketOrder");
+    let order = match &res.messages[1].msg {
+        CosmosMsg::Any(any) => {
+            assert_eq!(any.type_url, MsgCreateDerivativeMarketOrder::TYPE_URL);
+            MsgCreateDerivativeMarketOrder::try_from(any.value.clone()).unwrap()
         }
-        _ => panic!("expected MsgCreateDerivativeMarketOrder stargate message"),
-    }
+        _ => panic!("expected MsgCreateDerivativeMarketOrder CosmosMsg::Any"),
+    };
+    let derivative = order.order.unwrap();
+    assert_eq!(derivative.order_type, OrderType::BuyAtomic as i32);
+    assert_eq!(derivative.margin, "2000000");
+    let info = derivative.order_info.unwrap();
+    assert_eq!(info.subaccount_id, subaccount);
+    assert_eq!(info.fee_recipient, mock_env().contract.address.as_str());
+    assert_eq!(info.price, "2000");
+    assert_eq!(info.quantity, "2000");
     assert_eq!(res.attributes[0].value, "open_position");
     assert_eq!(
         TREASURY_BALANCE.load(&deps.storage).unwrap(),
@@ -1503,7 +1524,7 @@ fn open_position_high_notional_no_overflow() {
     )
     .unwrap();
 
-    let initial_treasury = 300_000_000_000_000_000_000_000_000_000_000_000_000u128;
+    let initial_treasury = u128::MAX;
     execute(
         deps.as_mut(),
         mock_env(),
@@ -1512,15 +1533,12 @@ fn open_position_high_notional_no_overflow() {
     )
     .unwrap();
 
-    // qty = 2 * 10^19 (fits in u128)
-    // price = 2.5 * 10^19 (fits in u128)
-    // qty * price = 5 * 10^38 > u128::MAX (~3.4 * 10^38)
-    // margin = 2 * 10^38 (fits in u128)
-    // leverage = 5 * 10^38 / 2 * 10^38 = 2.5x <= max_leverage 5x
-    let qty_str = "20000000000000000000";
-    let price_str = "25000000000000000000";
-    let margin_str = "200000000000000000000000000000000000000";
-
+    // qty = 2^118 and price = 2^20. Their product is 2^138, above u128::MAX (2^128 - 1),
+    // so the leverage check must multiply in Uint256. Notional is that product and
+    // fits in Uint128. Margin is 2^136, which is 4x and within the 5x cap.
+    let qty_str = "332306998946228968225951765070086144";
+    let price_str = "1048576";
+    let margin_str = "83076749736557242056487941267521536";
     let res = execute(
         deps.as_mut(),
         mock_env(),
@@ -1534,7 +1552,7 @@ fn open_position_high_notional_no_overflow() {
             leverage: None,
         },
     );
-    assert!(res.is_ok());
+    assert!(res.is_ok(), "high notional open failed: {res:?}");
 }
 
 
@@ -1972,8 +1990,8 @@ fn test_leverage_too_high_rejection() {
     .unwrap_err();
     assert!(matches!(err, ContractError::LeverageTooHigh));
 
-    // 2. Implicit leverage: notional (qty * price) > max_leverage * margin
-    // 4000 * 1000 = 4_000_000 notional, 3x margin = 3_000_000
+    // 2. Implicit leverage: chain notional / 10^6 > max_leverage * margin.
+    // 4000 contracts × $1000 = 4_000_000_000_000 micro-units; 3× $1 = 3_000_000.
     let err = execute(
         deps.as_mut(),
         mock_env(),
@@ -1982,7 +2000,7 @@ fn test_leverage_too_high_rejection() {
             market_id: MARKET_1.to_string(),
             is_buy: true,
             quantity: "4000".to_string(),
-            price: "1000".to_string(),
+            price: "1000000000".to_string(),
             margin: "1000000".to_string(),
             leverage: None,
         },
@@ -2615,9 +2633,9 @@ fn test_action_events_emitted_on_positions_distribute_and_claim() {
     let (mut deps, owner) = setup();
     let alice = addr20("alice");
 
-    // Setup: alice stakes 60, owner deposits 5000
+    // Setup: alice stakes 60, owner deposits 2_000_000_000
     stake(&mut deps.as_mut(), &alice, 60);
-    deposit(&mut deps.as_mut(), &owner, 5000);
+    deposit(&mut deps.as_mut(), &owner, 2_000_000_000);
 
     // 1. OpenPosition event
     let res = execute(
@@ -2628,8 +2646,8 @@ fn test_action_events_emitted_on_positions_distribute_and_claim() {
             market_id: MARKET_1.to_string(),
             is_buy: true,
             quantity: "100".to_string(),
-            price: "30".to_string(),
-            margin: "1000".to_string(),
+            price: "30000000".to_string(),
+            margin: "1000000000".to_string(),
             leverage: Some("3".to_string()),
         },
     )
@@ -2639,11 +2657,11 @@ fn test_action_events_emitted_on_positions_distribute_and_claim() {
     assert_eq!(attr("trader"), Some(owner.as_str()));
     assert_eq!(attr("market_id"), Some(MARKET_1));
     assert_eq!(attr("market"), Some(MARKET_1));
-    assert_eq!(attr("margin"), Some("1000"));
+    assert_eq!(attr("margin"), Some("1000000000"));
     assert_eq!(attr("leverage"), Some("3"));
     assert_eq!(attr("is_buy"), Some("true"));
     assert_eq!(attr("quantity"), Some("100"));
-    assert_eq!(attr("price"), Some("30"));
+    assert_eq!(attr("price"), Some("30000000"));
 
     // 2. ClosePosition event
     let res = execute(
@@ -2662,7 +2680,7 @@ fn test_action_events_emitted_on_positions_distribute_and_claim() {
     assert_eq!(attr("market_id"), Some(MARKET_1));
     assert_eq!(attr("market"), Some(MARKET_1));
     assert_eq!(attr("quantity"), Some("100"));
-    assert_eq!(attr("margin_released"), Some("1000"));
+    assert_eq!(attr("margin_released"), Some("1000000000"));
     assert_eq!(attr("realized_pnl"), Some("0"));
 
     // Record PnL so distribute succeeds
@@ -3545,7 +3563,8 @@ fn test_exhaustive_risk_limit_rejections_market_size_leverage() {
     .unwrap_err();
     assert!(matches!(err, ContractError::LeverageTooHigh));
 
-    // 7. LeverageTooHigh (implicit notional: qty 1000 * price 40 = 40_000; margin = 10_000; 4x > 3x)
+    // 7. LeverageTooHigh. Chain price $40 is "40000000".
+    // 1000 contracts × $40 = 40_000_000_000 micro-units; margin 10_000 is 4_000_000x.
     let err = execute(
         deps.as_mut(),
         mock_env(),
@@ -3554,7 +3573,7 @@ fn test_exhaustive_risk_limit_rejections_market_size_leverage() {
             market_id: MARKET_1.to_string(),
             is_buy: true,
             quantity: "1000".to_string(),
-            price: "40".to_string(),
+            price: "40000000".to_string(),
             margin: "10000".to_string(),
             leverage: None,
         },
@@ -4268,24 +4287,25 @@ fn test_close_position_emits_injective_derivative_and_withdraw_messages() {
     assert_eq!(close_res.messages.len(), 2);
     assert_eq!(close_res.messages[0].id, REPLY_CLOSE_POSITION);
 
-    #[allow(deprecated)]
-    match &close_res.messages[0].msg {
-        CosmosMsg::Stargate { type_url, .. } => {
-            assert_eq!(
-                type_url,
-                "/injective.exchange.v1beta1.MsgCreateDerivativeMarketOrder"
-            );
+    let close_order = match &close_res.messages[0].msg {
+        CosmosMsg::Any(any) => {
+            assert_eq!(any.type_url, MsgCreateDerivativeMarketOrder::TYPE_URL);
+            MsgCreateDerivativeMarketOrder::try_from(any.value.clone()).unwrap()
         }
-        _ => panic!("expected MsgCreateDerivativeMarketOrder stargate message"),
-    }
+        _ => panic!("expected MsgCreateDerivativeMarketOrder CosmosMsg::Any"),
+    };
+    let derivative = close_order.order.unwrap();
+    assert_eq!(derivative.order_type, OrderType::SellAtomic as i32);
+    assert_eq!(derivative.margin, "0");
 
-    #[allow(deprecated)]
-    match &close_res.messages[1].msg {
-        CosmosMsg::Stargate { type_url, .. } => {
-            assert_eq!(type_url, "/injective.exchange.v1beta1.MsgWithdraw");
+    let withdraw = match &close_res.messages[1].msg {
+        CosmosMsg::Any(any) => {
+            assert_eq!(any.type_url, MsgWithdraw::TYPE_URL);
+            MsgWithdraw::try_from(any.value.clone()).unwrap()
         }
-        _ => panic!("expected MsgWithdraw stargate message"),
-    }
+        _ => panic!("expected MsgWithdraw CosmosMsg::Any"),
+    };
+    assert_eq!(withdraw.amount.unwrap().amount, "1000000");
 }
 
 #[test]
@@ -4355,4 +4375,140 @@ fn test_reply_handlers_success_and_error() {
     };
     let err = reply(deps.as_mut(), env, reply_unknown).unwrap_err();
     assert!(err.to_string().contains("unknown reply id: 999"));
+}
+
+#[test]
+fn chain_price_one_contract_at_one_x_is_not_leverage_too_high() {
+    // Reproduction of the testnet rejection:
+    // quantity "1", price "1818700000" ($1,818.70), margin "1000000" ($1), leverage "1".
+    // The old check treated notional as 1 * 1_818_700_000 and rejected a 1x order.
+    // Scaled notional is 1_818.70 USDC, so $1 margin is ~1,818.70x and must still fail.
+    // The same order passes at the 1x margin of 1_818_700_000, and a 0.01 contract
+    // passes at the matching 18_187_000_000 margin.
+    let mut deps = inj_deps();
+    let admin = addr20("admin");
+    instantiate(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        InstantiateMsg {
+            owner: admin.to_string(),
+            seed_denom: SEED.to_string(),
+            treasury_denom: USDT.to_string(),
+            trader: None,
+            allowed_markets: vec![MARKET_1.to_string()],
+            max_leverage: Some(Decimal::from_ratio(2u128, 1u128)),
+            max_position_size: Some(Uint128::new(10_000_000)),
+            max_exposure_bps: Some(10_000),
+            max_total_margin_bps: None,
+            max_position_margin: Some(Uint128::new(100_000_000_000)),
+            cooldown_seconds: Some(0),
+        },
+    )
+    .unwrap();
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &coins(5_000_000_000_000, USDT)),
+        ExecuteMsg::DepositTreasury {},
+    )
+    .unwrap();
+
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: MARKET_1.to_string(),
+            is_buy: false,
+            quantity: "1".to_string(),
+            price: "1818700000".to_string(),
+            margin: "1000000".to_string(),
+            leverage: Some("1".to_string()),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::LeverageTooHigh));
+    assert_eq!(RESERVED_MARGIN.load(&deps.storage).unwrap(), Uint128::zero());
+
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: MARKET_1.to_string(),
+            is_buy: false,
+            quantity: "1".to_string(),
+            price: "1818700000".to_string(),
+            margin: "1818700000".to_string(),
+            leverage: Some("1".to_string()),
+        },
+    )
+    .unwrap();
+
+    let order = match &res.messages[1].msg {
+        CosmosMsg::Any(any) => {
+            assert_eq!(any.type_url, MsgCreateDerivativeMarketOrder::TYPE_URL);
+            MsgCreateDerivativeMarketOrder::try_from(any.value.clone()).unwrap()
+        }
+        _ => panic!("expected MsgCreateDerivativeMarketOrder CosmosMsg::Any"),
+    };
+    let derivative = order.order.unwrap();
+    assert_eq!(derivative.order_type, OrderType::SellAtomic as i32);
+    assert_eq!(derivative.margin, "1818700000");
+    let info = derivative.order_info.unwrap();
+    assert_eq!(info.price, "1818700000");
+    assert_eq!(info.quantity, "1");
+    assert_eq!(
+        RESERVED_MARGIN.load(&deps.storage).unwrap(),
+        Uint128::new(1_818_700_000)
+    );
+
+    let stored = POSITIONS.load(&deps.storage, MARKET_1).unwrap();
+    assert_eq!(stored.quantity, Decimal256::one());
+    assert_eq!(stored.price, Uint128::new(1_818_700_000));
+    assert_eq!(stored.margin, Uint128::new(1_818_700_000));
+
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::ClosePosition {
+            market_id: MARKET_1.to_string(),
+            quantity: Some("1".to_string()),
+        },
+    )
+    .unwrap();
+
+    // 0.01 contract × chain price 1_818_700_000 is notional 18_187_000_000.
+    let res = execute(
+        deps.as_mut(),
+        mock_env(),
+        message_info(&admin, &[]),
+        ExecuteMsg::OpenPosition {
+            market_id: MARKET_1.to_string(),
+            is_buy: false,
+            quantity: "0.01".to_string(),
+            price: "1818700000".to_string(),
+            margin: "18187000000".to_string(),
+            leverage: Some("1".to_string()),
+        },
+    )
+    .unwrap();
+    let order = match &res.messages[1].msg {
+        CosmosMsg::Any(any) => {
+            MsgCreateDerivativeMarketOrder::try_from(any.value.clone()).unwrap()
+        }
+        _ => panic!("expected MsgCreateDerivativeMarketOrder CosmosMsg::Any"),
+    };
+    assert_eq!(order.order.unwrap().order_info.unwrap().quantity, "0.01");
+    assert_eq!(
+        POSITIONS.load(&deps.storage, MARKET_1).unwrap().quantity,
+        Decimal256::from_ratio(1u128, 100u128)
+    );
+    assert_eq!(
+        RESERVED_MARGIN.load(&deps.storage).unwrap(),
+        Uint128::new(18_187_000_000)
+    );
 }

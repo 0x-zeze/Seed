@@ -102,7 +102,7 @@ Yield is strictly contingent on generating positive realized trading profit or n
 The contract enforces programmatic safety invariants before any derivative position can be opened:
 
 - **Market Allowlist (`allowed_markets`)**: Positions can only be opened on explicit market IDs approved in the configuration.
-- **Maximum Leverage (`max_leverage`)**: Hard ceiling on position leverage (default 3x). Both explicit leverage parameters and implicit notional leverage (`quantity * price / margin`) are validated against this limit.
+- **Maximum Leverage (`max_leverage`)**: Hard ceiling on position leverage (default 3x). Both explicit leverage and implicit notional leverage are checked. Notional is `quantity * chain_price` in the same micro-units as margin (`quote_decimals` fixed at 6, already inside the chain price). `price` and `margin` are chain integers; `quantity` is contracts and may be fractional (`"0.01"`).
 - **Maximum Exposure (`max_exposure_bps`)**: Total reserved margin across all open positions cannot exceed a configured percentage of total treasury (default 5,000 bps = 50%).
 - **Maximum Position Size (`max_position_size`)**: Base quantity limit for any individual order to prevent oversized exposure.
 - **Maximum Position Margin (`max_position_margin`)**: Margin limit on a single position to prevent concentrated risk.

@@ -30,10 +30,10 @@ pub enum ExecuteMsg {
 2. Verify contract is not paused (`ensure_not_paused`).
 3. Enforce trading cooldown: `now >= last_opened + config.cooldown_seconds` (`ContractError::CooldownActive`).
 4. Validate market allowlist: `market_id` must exist in `config.allowed_markets` (`ContractError::MarketNotAllowed`).
-5. Parse and validate non-zero amounts for `quantity`, `price`, and `margin`.
+5. Parse and validate non-zero amounts for `quantity`, `price`, and `margin`. `price` and `margin` are integer chain strings. `quantity` is a contract amount and may include one decimal point (`"0.01"`).
 6. Enforce single position per market: reject if market already exists in `POSITIONS` (`ContractError::PositionAlreadyOpen`).
-7. Enforce position limits: reject if `margin > config.max_position_margin` or `quantity > config.max_position_size` (`ContractError::PositionTooLarge`).
-8. Enforce leverage limits: validate explicit `leverage` parameter (if provided) and implicit notional leverage (`quantity * price / margin`) against `config.max_leverage` (`ContractError::LeverageTooHigh`).
+7. Enforce position limits: reject if `margin > config.max_position_margin` or the whole-contract part of `quantity` exceeds `config.max_position_size` (`ContractError::PositionTooLarge`). A quantity below 1 contract is allowed.
+8. Enforce leverage limits: validate explicit `leverage` (if provided) and implicit notional leverage against `config.max_leverage` (`ContractError::LeverageTooHigh`). Notional is `quantity * chain_price`. Chain price already carries `10^6`, and margin is quote base units, so both sides of the comparison are micro-units. Do not divide the product by `10^6` again.
 9. Enforce free treasury solvency: require `margin <= TREASURY_BALANCE` (`ContractError::InsufficientTreasury`).
 10. Enforce portfolio exposure: require `new_reserved <= total_treasury * config.max_exposure_bps / 10000` (`ContractError::ExposureLimitExceeded`).
 11. Deduct margin from `TREASURY_BALANCE` and add to `RESERVED_MARGIN`.
@@ -75,15 +75,17 @@ pub enum ExecuteMsg {
 ```bash
 injectived tx wasm execute $CONTRACT '{
   "open_position": {
-    "market_id": "0x0511ddc4e6586f3bfe1acb2dd905f8b8a82c97e1edaef65470f6a2cdbb493b60",
-    "is_buy": true,
-    "quantity": "100000000000000000",
-    "price": "25000000000000000000",
-    "margin": "1000000000000000000",
-    "leverage": "2"
+    "market_id": "0x135de28700392fb1c17d40d5170a74f30055a4ad522feddafec42fbbbb780897",
+    "is_buy": false,
+    "quantity": "0.01",
+    "price": "1818700000",
+    "margin": "18187000000",
+    "leverage": "1"
   }
 }' --from $TRADER --chain-id injective-888
 ```
+
+`price` is chain format (`$1,818.70` × 10^6). `quantity` is contracts, so `"0.01"` is one hundredth of a contract, not an integer minimum of 1. Notional compared with margin is `0.01 × 1_818_700_000 = 18_187_000_000`, and that is the 1x margin. The order message receives these strings unchanged.
 
 ## Notes
 - Exchange module integration will utilize `injective-std 1.20.0` protobuf types once subaccount IDs and wire formatting are finalized.

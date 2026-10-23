@@ -1,6 +1,6 @@
 use cosmwasm_std::{
-    entry_point, to_json_binary, BankMsg, Binary, Coin, CosmosMsg, Decimal, Decimal256, Deps,
-    DepsMut, Empty, Env, Int128, MessageInfo, Order, Reply, Response, StdError, StdResult,
+    entry_point, to_json_binary, AnyMsg, BankMsg, Binary, Coin, CosmosMsg, Decimal, Decimal256,
+    Deps, DepsMut, Empty, Env, Int128, MessageInfo, Order, Reply, Response, StdError, StdResult,
     SubMsg, SubMsgResult, Uint128, Uint256,
 };
 use cw_storage_plus::Bound;
@@ -532,6 +532,106 @@ fn parse_units(raw: &str, name: &str) -> Result<Uint128, ContractError> {
         .map_err(|_| StdError::msg(format!("invalid {name}")).into())
 }
 
+/// Contract quantity. Integer strings stay valid. A single decimal point is
+/// allowed so sizes below 1 contract (the market tick, e.g. "0.0001") parse.
+/// There is no chain-format minimum of 1.
+fn parse_decimal(raw: &str, name: &str) -> Result<Decimal256, ContractError> {
+    if !valid_decimal_str(raw) {
+        return Err(ContractError::InvalidAmount);
+    }
+    raw.parse::<Decimal256>()
+        .map_err(|_| StdError::msg(format!("invalid {name}")).into())
+}
+
+fn valid_decimal_str(raw: &str) -> bool {
+    let mut parts = raw.split('.');
+    let whole = match parts.next() {
+        Some(part) if !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()) => part,
+        _ => return false,
+    };
+    match parts.next() {
+        None => true,
+        Some(frac)
+            if !frac.is_empty()
+                && frac.len() <= Decimal256::DECIMAL_PLACES as usize
+                && frac.bytes().all(|byte| byte.is_ascii_digit())
+                && parts.next().is_none() =>
+        {
+            // "000.1" is rejected so stored and supplied strings compare equal.
+            !(whole.len() > 1 && whole.starts_with('0'))
+        }
+        _ => false,
+    }
+}
+
+/// `Decimal256` renders 18 fixed places (`"1.000000000000000000"`). The exchange
+/// wire value keeps the caller's shorter form (`"1"`, `"0.01"`).
+fn canonical_decimal(value: &Decimal256) -> String {
+    let rendered = value.to_string();
+    match rendered.split_once('.') {
+        Some((whole, frac)) => {
+            let trimmed = frac.trim_end_matches('0');
+            if trimmed.is_empty() {
+                whole.to_string()
+            } else {
+                format!("{whole}.{trimmed}")
+            }
+        }
+        None => rendered,
+    }
+}
+
+/// Quote-base notional: `quantity * chain_price`, rounded to the nearest unit.
+///
+/// `checked_mul` does not preserve a fixed number of trailing atomic digits:
+/// quantity `1` at price `1_818_700_000` has 18, while `2^118` at price `2^20`
+/// has 36. The scale is whatever atomics represent `1`, so dividing by that
+/// count leaves the integer product in the same units as margin.
+fn human_notional(quantity: Decimal256, price: Uint128) -> Result<Uint128, ContractError> {
+    let product = quantity
+        .checked_mul(Decimal256::from_ratio(price, 1u128))
+        .map_err(|e| ContractError::Std(StdError::msg(e)))?;
+    let one_atomics = Decimal256::one().atomics();
+    let mut quote_scale = one_atomics;
+    while quote_scale < product.atomics()
+        && product.atomics() / quote_scale >= one_atomics
+    {
+        quote_scale = quote_scale
+            .checked_mul(one_atomics)
+            .map_err(|e| ContractError::Std(StdError::msg(e)))?;
+    }
+    let half = quote_scale / Uint256::from(2u128);
+    let rounded = product
+        .atomics()
+        .checked_add(half)
+        .map_err(|e| ContractError::Std(StdError::msg(e)))?
+        / quote_scale;
+    Uint128::try_from(rounded).map_err(|e| ContractError::Std(StdError::msg(e)))
+}
+
+/// `injective-std`'s `From` impl still builds the deprecated `CosmosMsg::Stargate`.
+/// Same protobuf bytes, emitted as `CosmosMsg::Any` so CosmWasm 2+ chains accept it.
+fn exchange_any(msg: ExchangeMsg) -> CosmosMsg<Empty> {
+    let (type_url, value) = match msg {
+        ExchangeMsg::Deposit(msg) => (MsgDeposit::TYPE_URL, Binary::from(msg)),
+        ExchangeMsg::MarketOrder(msg) => (
+            MsgCreateDerivativeMarketOrder::TYPE_URL,
+            Binary::from(msg),
+        ),
+        ExchangeMsg::Withdraw(msg) => (MsgWithdraw::TYPE_URL, Binary::from(msg)),
+    };
+    CosmosMsg::Any(AnyMsg {
+        type_url: type_url.to_string(),
+        value,
+    })
+}
+
+enum ExchangeMsg {
+    Deposit(MsgDeposit),
+    MarketOrder(MsgCreateDerivativeMarketOrder),
+    Withdraw(MsgWithdraw),
+}
+
 #[allow(clippy::too_many_arguments)]
 fn open_position(
     deps: DepsMut<Empty>,
@@ -563,11 +663,11 @@ fn open_position(
         return Err(ContractError::CooldownActive);
     }
 
-    let qty_u128 = parse_units(&quantity, "quantity")?;
+    let qty = parse_decimal(&quantity, "quantity")?;
     let price_u128 = parse_units(&price, "price")?;
     let margin_u128 = parse_units(&margin, "margin")?;
 
-    if qty_u128.is_zero() || margin_u128.is_zero() {
+    if qty.is_zero() || margin_u128.is_zero() {
         return Err(ContractError::ZeroAmount);
     }
     if price_u128.is_zero() {
@@ -578,7 +678,10 @@ fn open_position(
         return Err(ContractError::PositionAlreadyOpen { market_id });
     }
 
-    if margin_u128 > config.max_position_margin || qty_u128 > config.max_position_size {
+    // `max_position_size` is whole contracts. A fractional quantity below 1 is
+    // always under that cap; larger sizes compare the integer part only.
+    let qty_whole = qty.to_uint_floor();
+    if margin_u128 > config.max_position_margin || qty_whole > Uint256::from(config.max_position_size) {
         return Err(ContractError::PositionTooLarge);
     }
 
@@ -591,13 +694,19 @@ fn open_position(
         }
     }
 
-    let notional_256 = Uint256::from(qty_u128)
-        .checked_mul(Uint256::from(price_u128))
-        .map_err(|e| ContractError::Std(StdError::msg(e)))?;
-    let max_notional = Decimal256::from(config.max_leverage)
-        .checked_mul(Decimal256::from_ratio(margin_u128, 1u128))
-        .map_err(|e| ContractError::Std(StdError::msg(e)))?;
-    if Decimal256::from_ratio(notional_256, 1u128) > max_notional {
+    // Price and margin stay in chain units and are forwarded unchanged.
+    // Quantity is a contract amount and may be fractional ("0.01" = 0.01 contracts).
+    // Notional is quantity * chain price, so a chain price already carrying
+    // 10^QUOTE_DECIMALS is compared in the same micro-units as margin.
+    let notional = human_notional(qty, price_u128)?;
+    let max_notional = Uint128::try_from(
+        Decimal256::from_ratio(margin_u128, 1u128)
+            .checked_mul(Decimal256::from(config.max_leverage))
+            .map_err(|e| ContractError::Std(StdError::msg(e)))?
+            .to_uint_floor(),
+    )
+    .map_err(|e| ContractError::Std(StdError::msg(e)))?;
+    if notional > max_notional {
         return Err(ContractError::LeverageTooHigh);
     }
 
@@ -627,16 +736,13 @@ fn open_position(
     let lev_val = if let Some(ref lev) = leverage {
         lev.clone()
     } else {
-        let notional = Uint256::from(qty_u128)
-            .checked_mul(Uint256::from(price_u128))
-            .map_err(|e| ContractError::Std(StdError::msg(e)))?;
         Decimal256::from_ratio(notional, margin_u128).to_string()
     };
 
     let pos = Position {
         market_id: market_id.clone(),
         is_buy,
-        quantity: qty_u128,
+        quantity: qty,
         price: price_u128,
         margin: margin_u128,
         leverage: leverage.clone(),
@@ -644,19 +750,33 @@ fn open_position(
     };
     POSITIONS.save(deps.storage, &market_id, &pos)?;
 
+    // Default subaccount: `0x` + 20-byte address hex + 24 zero hex chars (nonce 0).
+    // See `addresses::default_subaccount_id`.
     let subaccount_id = crate::addresses::default_subaccount_id(&env.contract.address)?;
 
-    let deposit_msg: CosmosMsg<Empty> = MsgDeposit {
+    // Move the reserved margin from the contract bank balance into the exchange
+    // subaccount. Local `TREASURY_BALANCE` / `RESERVED_MARGIN` above is unchanged
+    // by this message; chain settlement is still separate.
+    //
+    // `price` and `margin` are already chain units (quote_decimals = QUOTE_DECIMALS,
+    // 6 for the preferred ETH/INJ perps). A human price of $1.00 is the string
+    // "1000000", not "1". `quantity` is contract units and may include a decimal
+    // point ("0.01"). LegacyDec accepts both forms as-is; nothing is rescaled here.
+    let deposit_msg = MsgDeposit {
         sender: env.contract.address.to_string(),
         subaccount_id: subaccount_id.clone(),
         amount: Some(injective_std::types::cosmos::base::v1beta1::Coin {
             denom: config.treasury_denom.clone(),
             amount: margin_u128.to_string(),
         }),
-    }
-    .into();
+    };
 
-    let order_msg: CosmosMsg<Empty> = MsgCreateDerivativeMarketOrder {
+    // Atomic market orders (BuyAtomic = 9, SellAtomic = 10) are SmartContractsOnly
+    // and match inside DeliverTx. Plain Buy/Sell only rest until EndBlocker, so a
+    // reply would fire before any fill. `price` is the worst acceptable price, not
+    // an unlimited market price. Realized PnL is still not booked: ClosePosition
+    // records 0 until exchange settlement is wired.
+    let order_msg = MsgCreateDerivativeMarketOrder {
         sender: env.contract.address.to_string(),
         order: Some(DerivativeOrder {
             market_id: market_id.clone(),
@@ -664,24 +784,26 @@ fn open_position(
                 subaccount_id,
                 fee_recipient: env.contract.address.to_string(),
                 price: price_u128.to_string(),
-                quantity: qty_u128.to_string(),
+                quantity: quantity.clone(),
                 cid: "".to_string(),
             }),
             order_type: if is_buy {
-                OrderType::Buy as i32
+                OrderType::BuyAtomic as i32
             } else {
-                OrderType::Sell as i32
+                OrderType::SellAtomic as i32
             },
             margin: margin_u128.to_string(),
             trigger_price: "".to_string(),
         }),
-    }
-    .into();
+    };
 
-    let order_submsg = SubMsg::reply_on_success(order_msg, REPLY_OPEN_POSITION);
+    let order_submsg = SubMsg::reply_on_success(
+        exchange_any(ExchangeMsg::MarketOrder(order_msg)),
+        REPLY_OPEN_POSITION,
+    );
 
     Ok(Response::new()
-        .add_message(deposit_msg)
+        .add_message(exchange_any(ExchangeMsg::Deposit(deposit_msg)))
         .add_submessage(order_submsg)
         .add_attribute("action", "open_position")
         .add_attribute("trader", &info.sender)
@@ -690,7 +812,7 @@ fn open_position(
         .add_attribute("margin", margin_u128)
         .add_attribute("leverage", lev_val)
         .add_attribute("is_buy", is_buy.to_string())
-        .add_attribute("quantity", qty_u128)
+        .add_attribute("quantity", quantity)
         .add_attribute("price", price_u128))
 }
 
@@ -711,7 +833,7 @@ fn close_position(
         })?;
 
     if let Some(ref q) = quantity {
-        let qty = parse_units(q, "quantity")?;
+        let qty = parse_decimal(q, "quantity")?;
         if qty.is_zero() {
             return Err(ContractError::ZeroAmount);
         }
@@ -726,7 +848,14 @@ fn close_position(
 
     let subaccount_id = crate::addresses::default_subaccount_id(&env.contract.address)?;
 
-    let close_order: CosmosMsg<Empty> = MsgCreateDerivativeMarketOrder {
+    // price and quantity are forwarded unchanged. Price is chain units
+    // (quote_decimals = QUOTE_DECIMALS). Quantity is contract units, including
+    // fractions. No extra scaling is applied on the way out.
+    //
+    // Opposite side of the open: a long closes with SellAtomic, a short with
+    // BuyAtomic. margin "0" is reduce-only. Realized PnL from the reply is still
+    // pending; this response books realized_pnl = 0 and the reply does not write state.
+    let close_order = MsgCreateDerivativeMarketOrder {
         sender: env.contract.address.to_string(),
         order: Some(DerivativeOrder {
             market_id: market_id.clone(),
@@ -734,42 +863,43 @@ fn close_position(
                 subaccount_id: subaccount_id.clone(),
                 fee_recipient: env.contract.address.to_string(),
                 price: pos.price.to_string(),
-                quantity: pos.quantity.to_string(),
+                quantity: canonical_decimal(&pos.quantity),
                 cid: "".to_string(),
             }),
             order_type: if pos.is_buy {
-                OrderType::Sell as i32
+                OrderType::SellAtomic as i32
             } else {
-                OrderType::Buy as i32
+                OrderType::BuyAtomic as i32
             },
             margin: "0".to_string(),
             trigger_price: "".to_string(),
         }),
-    }
-    .into();
+    };
 
-    let withdraw_msg: CosmosMsg<Empty> = MsgWithdraw {
+    let withdraw_msg = MsgWithdraw {
         sender: env.contract.address.to_string(),
         subaccount_id,
         amount: Some(injective_std::types::cosmos::base::v1beta1::Coin {
             denom: config.treasury_denom,
             amount: pos.margin.to_string(),
         }),
-    }
-    .into();
+    };
 
-    let close_submsg = SubMsg::reply_on_success(close_order, REPLY_CLOSE_POSITION);
+    let close_submsg = SubMsg::reply_on_success(
+        exchange_any(ExchangeMsg::MarketOrder(close_order)),
+        REPLY_CLOSE_POSITION,
+    );
 
     Ok(Response::new()
         .add_submessage(close_submsg)
-        .add_message(withdraw_msg)
+        .add_message(exchange_any(ExchangeMsg::Withdraw(withdraw_msg)))
         .add_attribute("action", "close_position")
         .add_attribute("trader", info.sender)
         .add_attribute("market_id", &market_id)
         .add_attribute("market", &market_id)
         .add_attribute(
             "quantity",
-            quantity.unwrap_or_else(|| pos.quantity.to_string()),
+            quantity.unwrap_or_else(|| canonical_decimal(&pos.quantity)),
         )
         .add_attribute("margin_released", pos.margin)
         .add_attribute("realized_pnl", "0"))
