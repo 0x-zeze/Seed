@@ -41,7 +41,7 @@ vault_balance(treasury_denom) >= TREASURY_BALANCE (free) + margin_in_exchange + 
 2. Verify `TOTAL_STAKED > 0`, otherwise reject with `ContractError::NoStakers` (cannot divide index increment by zero).
 3. Compute distributable profit: `distributable = max(0, REALIZED_PNL_NET - TOTAL_DISTRIBUTED)`. Require `0 < amount <= distributable`.
 4. Validate that `amount <= TREASURY_BALANCE` (free treasury).
-5. Increment `GLOBAL_INDEX += Decimal256::from_ratio(amount, TOTAL_STAKED)`. If index delta is zero (distribution too small relative to stake), reject with `ContractError::DistributionTooSmallForIndex`.
+5. Increment `GLOBAL_INDEX += Decimal256::from_ratio(amount, TOTAL_STAKED)`. If index delta is zero (distribution too small relative to stake), reject with `ContractError::InvalidAmount`.
 6. Update balances:
    - `TOTAL_DISTRIBUTED += amount`
    - `REWARDS_RESERVED += amount`
@@ -72,8 +72,7 @@ vault_balance(treasury_denom) >= TREASURY_BALANCE (free) + margin_in_exchange + 
 - `ContractError::Unauthorized`: Caller is not owner
 - `ContractError::Paused`: Contract is paused
 - `ContractError::NoStakers`: Total staked tokens equal zero
-- `ContractError::InvalidAmount`: Amount is zero or exceeds distributable profit (`REALIZED_PNL_NET - TOTAL_DISTRIBUTED`)
-- `ContractError::DistributionTooSmallForIndex`: Index increment rounds to zero
+- `ContractError::InvalidAmount`: Amount is zero, exceeds distributable profit (`REALIZED_PNL_NET - TOTAL_DISTRIBUTED`), or index increment rounds to zero
 - `ContractError::InsufficientTreasury`: Free treasury balance is less than distribution amount
 
 ## Example Call (CLI)
